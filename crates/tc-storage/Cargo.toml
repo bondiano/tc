@@ -1,0 +1,24 @@
+[package]
+name = "tc-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "YAML persistence layer for tc (Task Commander): tasks, config, and init."
+
+[dependencies]
+tc-core = { workspace = true }
+serde = { workspace = true }
+serde_yaml_ng = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+miette = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,222 @@
+use std::path::Path;
+
+use tc_core::task::{Task, TaskId};
+
+use crate::error::{StorageError, StorageResult};
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct TasksFile {
+    #[serde(default)]
+    tasks: Vec<Task>,
+}
+
+pub fn load(path: &Path) -> StorageResult<Vec<Task>> {
+    let content = std::fs::read_to_string(path).map_err(|e| StorageError::file_read(path, e))?;
+    let file: TasksFile =
+        serde_yaml_ng::from_str(&content).map_err(|e| StorageError::yaml_parse(path, e))?;
+    Ok(file.tasks)
+}
+
+pub fn save(path: &Path, tasks: &[Task]) -> StorageResult<()> {
+    let file = TasksFile {
+        tasks: tasks.to_vec(),
+    };
+    let content = serde_yaml_ng::to_string(&file).map_err(StorageError::YamlSerialize)?;
+    std::fs::write(path, content).map_err(|e| StorageError::file_write(path, e))?;
+    Ok(())
+}
+
+pub fn next_id(tasks: &[Task]) -> TaskId {
+    let max = tasks
+        .iter()
+        .filter_map(|t| {
+            t.id.0
+                .strip_prefix("T-")
+                .and_then(|n| n.parse::<u32>().ok())
+        })
+        .max()
+        .unwrap_or(0);
+    TaskId(format!("T-{:03}", max + 1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use tc_core::status::StatusId;
+
+    fn make_task(id: &str) -> Task {
+        Task {
+            id: TaskId(id.to_string()),
+            title: format!("Task {id}"),
+            epic: "test".to_string(),
+            status: StatusId("todo".to_string()),
+            priority: tc_core::task::Priority::default(),
+            depends_on: vec![],
+            files: vec![],
+            pack_exclude: vec![],
+            notes: String::new(),
+            acceptance_criteria: vec![],
+            assignee: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn roundtrip_save_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.yaml");
+        let tasks = vec![make_task("T-001"), make_task("T-002")];
+
+        save(&path, &tasks).unwrap();
+        let loaded = load(&path).unwrap();
+
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].id.0, "T-001");
+        assert_eq!(loaded[1].id.0, "T-002");
+    }
+
+    #[test]
+    fn roundtrip_with_deps_and_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.yaml");
+        let mut task = make_task("T-002");
+        task.depends_on = vec![TaskId("T-001".into())];
+        task.files = vec!["src/main.rs".into(), "src/lib.rs".into()];
+        task.notes = "Some notes".into();
+
+        save(&path, &[task]).unwrap();
+        let loaded = load(&path).unwrap();
+
+        assert_eq!(loaded[0].depends_on.len(), 1);
+        assert_eq!(loaded[0].depends_on[0].0, "T-001");
+        assert_eq!(loaded[0].files.len(), 2);
+        assert_eq!(loaded[0].notes, "Some notes");
+    }
+
+    #[test]
+    fn roundtrip_empty_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.yaml");
+
+        save(&path, &[]).unwrap();
+        let loaded = load(&path).unwrap();
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn next_id_empty() {
+        assert_eq!(next_id(&[]).0, "T-001");
+    }
+
+    #[test]
+    fn next_id_sequential() {
+        let tasks = vec![make_task("T-001"), make_task("T-002")];
+        assert_eq!(next_id(&tasks).0, "T-003");
+    }
+
+    #[test]
+    fn next_id_with_gap() {
+        let tasks = vec![make_task("T-001"), make_task("T-005")];
+        assert_eq!(next_id(&tasks).0, "T-006");
+    }
+
+    #[test]
+    fn load_nonexistent_file() {
+        let result = load(std::path::Path::new("/nonexistent/tasks.yaml"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn roundtrip_with_acceptance_criteria() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.yaml");
+        let mut task = make_task("T-001");
+        task.acceptance_criteria = vec!["API returns 200".into(), "Tests pass".into()];
+
+        save(&path, &[task]).unwrap();
+        let loaded = load(&path).unwrap();
+
+        assert_eq!(loaded[0].acceptance_criteria.len(), 2);
+        assert_eq!(loaded[0].acceptance_criteria[0], "API returns 200");
+        assert_eq!(loaded[0].acceptance_criteria[1], "Tests pass");
+    }
+
+    #[test]
+    fn roundtrip_with_all_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.yaml");
+        let mut task = make_task("T-003");
+        task.depends_on = vec![TaskId("T-001".into()), TaskId("T-002".into())];
+        task.files = vec!["src/main.rs".into()];
+        task.pack_exclude = vec!["*.test.*".into()];
+        task.notes = "Important notes".into();
+        task.acceptance_criteria = vec!["Works".into()];
+        task.assignee = Some(tc_core::task::Assignee::Claude);
+        task.priority = tc_core::task::Priority::Critical;
+
+        save(&path, &[task]).unwrap();
+        let loaded = load(&path).unwrap();
+
+        assert_eq!(loaded[0].id.0, "T-003");
+        assert_eq!(loaded[0].depends_on.len(), 2);
+        assert_eq!(loaded[0].files, vec!["src/main.rs"]);
+        assert_eq!(loaded[0].pack_exclude, vec!["*.test.*"]);
+        assert_eq!(loaded[0].notes, "Important notes");
+        assert_eq!(loaded[0].acceptance_criteria, vec!["Works"]);
+        assert!(loaded[0].assignee.is_some());
+        assert_eq!(loaded[0].priority, tc_core::task::Priority::Critical);
+    }
+
+    #[test]
+    fn roundtrip_with_priority() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.yaml");
+        let mut task = make_task("T-001");
+        task.priority = tc_core::task::Priority::High;
+
+        save(&path, &[task]).unwrap();
+        let loaded = load(&path).unwrap();
+
+        assert_eq!(loaded[0].priority, tc_core::task::Priority::High);
+    }
+
+    #[test]
+    fn roundtrip_priority_defaults_to_normal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.yaml");
+        // Write YAML without priority field to test backward compatibility
+        std::fs::write(&path, "tasks:\n- id: T-001\n  title: Test\n  epic: be\n  status: todo\n  assignee: null\n  created_at: 2025-01-01T00:00:00Z\n").unwrap();
+        let loaded = load(&path).unwrap();
+
+        assert_eq!(loaded[0].priority, tc_core::task::Priority::Normal);
+    }
+
+    #[test]
+    fn roundtrip_preserves_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.yaml");
+        let tasks = vec![make_task("T-003"), make_task("T-001"), make_task("T-002")];
+
+        save(&path, &tasks).unwrap();
+        let loaded = load(&path).unwrap();
+
+        assert_eq!(loaded[0].id.0, "T-003");
+        assert_eq!(loaded[1].id.0, "T-001");
+        assert_eq!(loaded[2].id.0, "T-002");
+    }
+
+    #[test]
+    fn next_id_with_non_standard_ids() {
+        let mut task = make_task("custom-id");
+        task.id = TaskId("custom-id".into());
+        let tasks = vec![task, make_task("T-010")];
+        assert_eq!(next_id(&tasks).0, "T-011");
+    }
+
+    #[test]
+    fn next_id_single_task() {
+        let tasks = vec![make_task("T-042")];
+        assert_eq!(next_id(&tasks).0, "T-043");
+    }
+}

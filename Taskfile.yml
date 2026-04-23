@@ -1,0 +1,160 @@
+version: "3"
+
+# Taskfile for Task Commander.
+# Install go-task: https://taskfile.dev/installation/
+# Then: `task` (lists all) or `task <name>`.
+
+silent: true
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+
+  # ── Build ────────────────────────────────────────────────────────
+
+  build:
+    desc: Debug build of the tc binary
+    cmds:
+      - cargo build -p tc
+
+  build:release:
+    desc: Release build of the tc binary
+    cmds:
+      - cargo build -p tc --release
+
+  install:
+    desc: Install tc binary to ~/.cargo/bin
+    cmds:
+      - cargo install --path crates/tc --force
+
+  # ── Tests ────────────────────────────────────────────────────────
+
+  test:
+    desc: Run all tests (unit + integration)
+    cmds:
+      - cargo test
+
+  test:core:
+    desc: Run tc-core tests
+    cmds:
+      - cargo test -p tc-core
+
+  test:storage:
+    desc: Run tc-storage tests
+    cmds:
+      - cargo test -p tc-storage
+
+  test:packer:
+    desc: Run tc-packer tests
+    cmds:
+      - cargo test -p tc-packer
+
+  test:executor:
+    desc: Run tc-executor tests
+    cmds:
+      - cargo test -p tc-executor
+
+  test:spawn:
+    desc: Run tc-spawn tests (worktree, scheduler, recovery, merge)
+    cmds:
+      - cargo test -p tc-spawn
+
+  test:cli:
+    desc: Run tc CLI tests
+    cmds:
+      - cargo test -p tc
+
+  test:integration:
+    desc: Run all integration tests (tc-spawn + tc CLI)
+    cmds:
+      - cargo test -p tc-spawn --test integration
+      - cargo test -p tc --test integration
+
+  test:flow:
+    desc: Run the full spawn-flow integration test (verbose)
+    cmds:
+      - cargo test -p tc-spawn full_spawn_poll_merge_flow -- --nocapture
+
+  test:one:
+    desc: 'Run a single test by name. Usage: task test:one -- <test_name>'
+    cmds:
+      - cargo test {{.CLI_ARGS}} -- --nocapture
+
+  # ── Lint / Format ────────────────────────────────────────────────
+
+  fmt:
+    desc: Auto-format all code
+    cmds:
+      - cargo fmt
+
+  fmt:check:
+    desc: Verify formatting (no changes)
+    cmds:
+      - cargo fmt --check
+
+  clippy:
+    desc: Run clippy with -D warnings
+    cmds:
+      - cargo clippy --all-targets -- -D warnings
+
+  lint:
+    desc: Run fmt:check + clippy
+    cmds:
+      - task: fmt:check
+      - task: clippy
+
+  fix:
+    desc: Auto-fix what cargo can (fmt + clippy --fix)
+    cmds:
+      - cargo fmt
+      - cargo clippy --fix --allow-dirty --allow-staged --all-targets
+
+  # ── Composite ────────────────────────────────────────────────────
+
+  check:
+    desc: Quick check (cargo check + clippy)
+    cmds:
+      - cargo check --all-targets
+      - task: clippy
+
+  ci:
+    desc: Full CI pipeline (lint + test)
+    cmds:
+      - task: lint
+      - task: test
+
+  # ── Maintenance ──────────────────────────────────────────────────
+
+  clean:
+    desc: Remove target/ and cached artifacts
+    cmds:
+      - cargo clean
+
+  deps:
+    desc: Show dependency tree of tc workspace
+    cmds:
+      - cargo tree --workspace --depth 1
+
+  outdated:
+    desc: Show outdated dependencies (requires cargo-outdated)
+    cmds:
+      - cargo outdated --workspace || echo "Install cargo-outdated -- cargo install cargo-outdated"
+
+  # ── Demo / Manual smoke test ─────────────────────────────────────
+
+  demo:
+    desc: Run a manual smoke-test in /tmp/tc-demo (init, add, list, validate, graph, stats)
+    cmds:
+      - rm -rf /tmp/tc-demo
+      - mkdir -p /tmp/tc-demo
+      - cd /tmp/tc-demo && git init -q && git checkout -q -b main && echo "# demo" > README.md && git add . && git -c user.email=t@t -c user.name=t commit -q -m init
+      - cd /tmp/tc-demo && cargo run -q --manifest-path {{.TASKFILE_DIR}}/Cargo.toml -p tc -- init
+      - cd /tmp/tc-demo && cargo run -q --manifest-path {{.TASKFILE_DIR}}/Cargo.toml -p tc -- add "Setup DB" --epic backend
+      - cd /tmp/tc-demo && cargo run -q --manifest-path {{.TASKFILE_DIR}}/Cargo.toml -p tc -- add "Build API" --epic backend --after T-001
+      - cd /tmp/tc-demo && cargo run -q --manifest-path {{.TASKFILE_DIR}}/Cargo.toml -p tc -- list
+      - cd /tmp/tc-demo && cargo run -q --manifest-path {{.TASKFILE_DIR}}/Cargo.toml -p tc -- validate
+      - cd /tmp/tc-demo && cargo run -q --manifest-path {{.TASKFILE_DIR}}/Cargo.toml -p tc -- graph
+      - cd /tmp/tc-demo && cargo run -q --manifest-path {{.TASKFILE_DIR}}/Cargo.toml -p tc -- stats
+      - echo "Demo project at /tmp/tc-demo"

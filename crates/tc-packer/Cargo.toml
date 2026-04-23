@@ -1,0 +1,22 @@
+[package]
+name = "tc-packer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "gitignore-aware file collector for tc (Task Commander). Packs relevant files into markdown/xml context for LLMs."
+
+[dependencies]
+thiserror = { workspace = true }
+miette = { workspace = true }
+ignore = { workspace = true }
+globset = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

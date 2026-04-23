@@ -1,0 +1,21 @@
+[package]
+name = "tc-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Core types, DAG, and status machine for tc (Task Commander). No I/O, no side effects."
+
+[dependencies]
+serde = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+miette = { workspace = true }
+petgraph = { workspace = true }
+minijinja = { workspace = true }

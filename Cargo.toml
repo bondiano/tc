@@ -1,0 +1,53 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tc-core",
+    "crates/tc-packer",
+    "crates/tc-storage",
+    "crates/tc-executor",
+    "crates/tc-spawn",
+    "crates/tc-tui",
+    "crates/tc",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+authors = ["bondiano <batbondik0@gmail.com>"]
+repository = "https://github.com/bondiano/tc"
+homepage = "https://github.com/bondiano/tc"
+documentation = "https://docs.rs/tc"
+readme = "README.md"
+keywords = ["cli", "tui", "task", "agent", "orchestrator"]
+categories = ["command-line-utilities", "development-tools"]
+
+[workspace.dependencies]
+# Internal
+tc-core = { path = "crates/tc-core", version = "0.1.0" }
+tc-packer = { path = "crates/tc-packer", version = "0.1.0" }
+tc-storage = { path = "crates/tc-storage", version = "0.1.0" }
+tc-executor = { path = "crates/tc-executor", version = "0.1.0" }
+tc-spawn = { path = "crates/tc-spawn", version = "0.1.0" }
+tc-tui = { path = "crates/tc-tui", version = "0.1.0" }
+
+# External
+serde = { version = "1", features = ["derive"] }
+serde_yaml_ng = "0.10"
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+anyhow = "1"
+miette = { version = "7", features = ["fancy"] }
+petgraph = "0.8"
+minijinja = "2"
+ignore = "0.4"
+globset = "0.4"
+which = "8"
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+ratatui = "0.30"
+crossterm = "0.29"
+tokio = { version = "1", features = ["process", "io-util", "rt-multi-thread", "macros", "time", "fs"] }
+reqwest = { version = "0.13", features = ["json"] }
+serde_json = "1"
