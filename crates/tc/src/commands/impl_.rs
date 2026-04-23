@@ -3,15 +3,13 @@ use crate::error::CliError;
 use crate::output;
 use std::io::{self, BufRead, Write};
 
-use tc_core::config::TcConfig;
+use tc_core::config::{ExecutionMode, ExecutorKind, SandboxPolicy, TcConfig};
 use tc_core::context::{ContextRenderer, build_resolved_deps};
 use tc_core::dag::TaskDag;
 use tc_core::status::{StatusId, StatusMachine};
 use tc_core::task::Task;
 use tc_executor::sandbox::sandbox_from_core;
-use tc_executor::traits::{
-    ExecutionMode, ExecutionRequest, Executor, SandboxConfig, SandboxPolicy,
-};
+use tc_executor::traits::{ExecutionRequest, Executor, SandboxConfig};
 use tc_packer::{PackOptions, PackStyle};
 
 pub fn run(args: ImplArgs) -> Result<(), CliError> {
@@ -98,13 +96,14 @@ pub fn run(args: ImplArgs) -> Result<(), CliError> {
     tasks[task_idx].status = StatusId::in_progress();
     store.save_tasks(&tasks)?;
 
-    // Determine execution mode
+    // Determine execution mode: CLI flags win over config; otherwise fall
+    // back to `config.executor.mode`, which the user sets in TUI settings.
     let mode = if args.yolo {
         ExecutionMode::Yolo
     } else if args.accept {
         ExecutionMode::Accept
     } else {
-        ExecutionMode::Interactive
+        config.executor.mode
     };
 
     let sandbox = if args.no_sandbox {
@@ -119,7 +118,7 @@ pub fn run(args: ImplArgs) -> Result<(), CliError> {
 
     let request = ExecutionRequest {
         context: context.clone(),
-        mode: mode.clone(),
+        mode,
         working_dir: store.root().clone(),
         sandbox,
         mcp_servers: vec![],
@@ -208,12 +207,12 @@ async fn run_executor(
     config: &TcConfig,
     request: &ExecutionRequest,
 ) -> Result<tc_executor::traits::ExecutionResult, CliError> {
-    let name = if args.opencode {
-        "opencode"
+    let kind = if args.opencode {
+        ExecutorKind::Opencode
     } else {
-        config.executor.default.as_str()
+        config.executor.default
     };
-    let executor = tc_executor::any::executor_by_name(name, config)?;
+    let executor = tc_executor::any::executor_by_kind(kind, config)?;
     executor
         .execute(request, None)
         .await

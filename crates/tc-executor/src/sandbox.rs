@@ -4,15 +4,10 @@ use crate::traits::{SandboxConfig, SandboxPolicy};
 
 /// Build an executor `SandboxConfig` from the core/user-facing config.
 ///
-/// Maps the stringly-typed `enabled` field to a `SandboxPolicy`.
+/// Both sides now share `SandboxPolicy`, so this is a straight copy.
 pub fn sandbox_from_core(core: &tc_core::config::SandboxConfig) -> SandboxConfig {
-    let enabled = match core.enabled.as_str() {
-        "always" => SandboxPolicy::Always,
-        "never" => SandboxPolicy::Never,
-        _ => SandboxPolicy::Auto,
-    };
     SandboxConfig {
-        enabled,
+        enabled: core.enabled,
         extra_allow: core.extra_allow.clone(),
         block_network: core.block_network,
     }

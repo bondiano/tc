@@ -53,10 +53,11 @@ pub fn run(args: SpawnArgs) -> Result<(), CliError> {
     let max_parallel = args.max.unwrap_or(config.spawn.max_parallel);
     let worktree_mgr = WorktreeManager::new(store.root().clone(), config.spawn.clone());
 
-    let executor = if config.executor.default == "opencode" {
-        build_executor_opencode()
-    } else {
-        build_executor_claude()
+    let executor = match config.executor.default {
+        tc_core::config::ExecutorKind::Opencode => build_executor_opencode(),
+        // spawn only ships claude/opencode backends; custom ones fall back
+        // to claude so headless runs still work from a TUI-selected config.
+        _ => build_executor_claude(),
     };
 
     let rt = tokio::runtime::Runtime::new()

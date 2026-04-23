@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use chrono::Utc;
 use tc_core::config::{
-    ExecutorConfig, PackerConfig, ResolverConfig, SandboxConfig, SpawnConfig, TcConfig,
-    VerificationConfig,
+    ExecutionMode, ExecutorConfig, ExecutorKind, PackerConfig, ResolverConfig, SandboxConfig,
+    SpawnConfig, TcConfig, VerificationConfig,
 };
 use tc_core::dag::TaskDag;
 use tc_core::status::{StatusDef, StatusId, StatusMachine};
@@ -41,8 +41,8 @@ pub fn dummy_config() -> TcConfig {
             },
         ],
         executor: ExecutorConfig {
-            default: "claude".into(),
-            mode: "accept".into(),
+            default: ExecutorKind::Claude,
+            mode: ExecutionMode::Accept,
             sandbox: SandboxConfig::default(),
             resolver: ResolverConfig::default(),
         },

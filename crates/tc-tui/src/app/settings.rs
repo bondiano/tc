@@ -1,5 +1,6 @@
 use crossterm::event::KeyCode;
-use tc_core::config::TcConfig;
+use tc_core::config::{ExecutionMode, ExecutorKind, SandboxPolicy, TcConfig};
+use tc_executor::any::is_installed;
 
 use crate::error::{TuiError, TuiResult};
 
@@ -33,22 +34,39 @@ impl SettingsField {
 #[derive(Debug, Clone)]
 pub struct SettingsState {
     pub field: SettingsField,
-    pub executor: String,
-    pub mode: String,
-    pub sandbox: String,
+    pub executor: ExecutorKind,
+    pub mode: ExecutionMode,
+    pub sandbox: SandboxPolicy,
     pub dirty: bool,
 }
 
 impl SettingsState {
     pub fn from_config(cfg: &TcConfig) -> Self {
+        let current = cfg.executor.default;
+        let executor = if is_installed(current, cfg) {
+            current
+        } else {
+            first_installed(cfg).unwrap_or(current)
+        };
         Self {
             field: SettingsField::Executor,
-            executor: cfg.executor.default.clone(),
-            mode: cfg.executor.mode.clone(),
-            sandbox: cfg.executor.sandbox.enabled.clone(),
+            executor,
+            mode: cfg.executor.mode,
+            sandbox: cfg.executor.sandbox.enabled,
             dirty: false,
         }
     }
+}
+
+/// First executor from `ExecutorKind::ALL` whose backing binary is on PATH.
+fn first_installed(cfg: &TcConfig) -> Option<ExecutorKind> {
+    'scan: for kind in ExecutorKind::ALL {
+        if is_installed(*kind, cfg) {
+            return Some(*kind);
+        }
+        continue 'scan;
+    }
+    None
 }
 
 impl App {
@@ -65,9 +83,9 @@ impl App {
             return Ok(());
         };
         let mut new_cfg = self.config.clone();
-        new_cfg.executor.default = state.executor.clone();
-        new_cfg.executor.mode = state.mode.clone();
-        new_cfg.executor.sandbox.enabled = state.sandbox.clone();
+        new_cfg.executor.default = state.executor;
+        new_cfg.executor.mode = state.mode;
+        new_cfg.executor.sandbox.enabled = state.sandbox;
         new_cfg
             .validate()
             .map_err(|e| TuiError::Render(format!("invalid settings: {e}")))?;
@@ -93,10 +111,10 @@ impl App {
                 state.field = state.field.prev();
             }
             KeyCode::Char('l') | KeyCode::Right | KeyCode::Char(' ') => {
-                cycle_settings_field(state, 1);
+                cycle_settings_field(state, 1, &self.config);
             }
             KeyCode::Char('h') | KeyCode::Left => {
-                cycle_settings_field(state, -1);
+                cycle_settings_field(state, -1, &self.config);
             }
             KeyCode::Enter => {
                 if state.dirty {
@@ -111,26 +129,61 @@ impl App {
     }
 }
 
-pub(super) fn cycle_settings_field(state: &mut SettingsState, delta: i32) {
-    use crate::components::settings::{EXECUTOR_OPTIONS, MODE_OPTIONS, SANDBOX_OPTIONS};
+pub(super) fn cycle_settings_field(state: &mut SettingsState, delta: i32, cfg: &TcConfig) {
+    match state.field {
+        SettingsField::Executor => {
+            if let Some(next) = cycle_executor(state.executor, delta, cfg)
+                && next != state.executor
+            {
+                state.executor = next;
+                state.dirty = true;
+            }
+        }
+        SettingsField::Mode => {
+            let next = cycle_variant(ExecutionMode::ALL, state.mode, delta);
+            if next != state.mode {
+                state.mode = next;
+                state.dirty = true;
+            }
+        }
+        SettingsField::Sandbox => {
+            let next = cycle_variant(SandboxPolicy::ALL, state.sandbox, delta);
+            if next != state.sandbox {
+                state.sandbox = next;
+                state.dirty = true;
+            }
+        }
+    }
+}
 
-    let (options, current) = match state.field {
-        SettingsField::Executor => (EXECUTOR_OPTIONS, &mut state.executor),
-        SettingsField::Mode => (MODE_OPTIONS, &mut state.mode),
-        SettingsField::Sandbox => (SANDBOX_OPTIONS, &mut state.sandbox),
-    };
-    if options.is_empty() {
-        return;
-    }
-    let idx = options
-        .iter()
-        .position(|o| *o == current.as_str())
-        .unwrap_or(0) as i32;
+/// Advance by `delta` through `options`, wrapping. Assumes `options` is
+/// non-empty and `current` appears in it (falls back to index 0 otherwise).
+fn cycle_variant<T: Copy + PartialEq>(options: &[T], current: T, delta: i32) -> T {
     let len = options.len() as i32;
-    let next = ((idx + delta).rem_euclid(len)) as usize;
-    let next_val = options[next].to_string();
-    if *current != next_val {
-        *current = next_val;
-        state.dirty = true;
+    let start = options.iter().position(|o| *o == current).unwrap_or(0) as i32;
+    let idx = (start + delta).rem_euclid(len) as usize;
+    options[idx]
+}
+
+/// Cycle executors, preferring kinds whose binary is on PATH.
+///
+/// If at least one other executor is installed, skip uninstalled ones so
+/// the user can't pick something that will fail to launch. If *nothing*
+/// is installed (e.g. the detection is wrong, or we're in a test), fall
+/// back to a plain cycle so the UI stays usable.
+fn cycle_executor(current: ExecutorKind, delta: i32, cfg: &TcConfig) -> Option<ExecutorKind> {
+    let opts = ExecutorKind::ALL;
+    let any_installed = opts.iter().any(|k| is_installed(*k, cfg));
+    let len = opts.len() as i32;
+    let start = opts.iter().position(|k| *k == current).unwrap_or(0) as i32;
+    let mut idx = start;
+    'scan: for _ in 0..opts.len() {
+        idx = (idx + delta).rem_euclid(len);
+        let candidate = opts[idx as usize];
+        if !any_installed || is_installed(candidate, cfg) {
+            return Some(candidate);
+        }
+        continue 'scan;
     }
+    None
 }

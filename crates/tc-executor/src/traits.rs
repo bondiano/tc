@@ -2,6 +2,10 @@ use std::path::{Path, PathBuf};
 
 use crate::error::ExecutorError;
 
+// Re-export canonical config enums so callers can keep importing them from
+// `tc_executor::traits` -- the data model lives in `tc-core` now.
+pub use tc_core::config::{ExecutionMode, SandboxPolicy};
+
 #[derive(Debug, Clone)]
 pub struct ExecutionRequest {
     pub context: String,
@@ -12,24 +16,10 @@ pub struct ExecutionRequest {
 }
 
 #[derive(Debug, Clone)]
-pub enum ExecutionMode {
-    Interactive,
-    Accept,
-    Yolo,
-}
-
-#[derive(Debug, Clone)]
 pub struct SandboxConfig {
     pub enabled: SandboxPolicy,
     pub extra_allow: Vec<PathBuf>,
     pub block_network: bool,
-}
-
-#[derive(Debug, Clone)]
-pub enum SandboxPolicy {
-    Auto,
-    Always,
-    Never,
 }
 
 #[derive(Debug, Clone)]

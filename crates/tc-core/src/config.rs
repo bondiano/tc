@@ -1,9 +1,160 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use crate::context::ContextRenderer;
 use crate::error::CoreError;
 use crate::status::StatusDef;
+
+// ── Typed config enums ─────────────────────────────────────────────────
+//
+// These replace the string-typed fields previously stored on `TcConfig`.
+// Each derives `Serialize`/`Deserialize` with `rename_all = "lowercase"`,
+// which means YAML stays unchanged (`claude`, `accept`, `auto`, ...) and
+// bad values fail at parse time instead of in a custom validator.
+//
+// Each also implements `Display` and `FromStr` for a conventional
+// string <-> enum round-trip, and exposes an `ALL` slice for TUI cycling.
+
+/// Which coding agent to invoke for `tc impl` and `tc spawn`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExecutorKind {
+    Claude,
+    Opencode,
+    Codex,
+    Pi,
+    Gemini,
+}
+
+impl ExecutorKind {
+    pub const ALL: &'static [Self] = &[
+        Self::Claude,
+        Self::Opencode,
+        Self::Codex,
+        Self::Pi,
+        Self::Gemini,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Opencode => "opencode",
+            Self::Codex => "codex",
+            Self::Pi => "pi",
+            Self::Gemini => "gemini",
+        }
+    }
+}
+
+impl fmt::Display for ExecutorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ExecutorKind {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "claude" => Ok(Self::Claude),
+            "opencode" => Ok(Self::Opencode),
+            "codex" => Ok(Self::Codex),
+            "pi" => Ok(Self::Pi),
+            "gemini" => Ok(Self::Gemini),
+            other => Err(format!(
+                "unknown executor '{other}' (valid: claude, opencode, codex, pi, gemini)"
+            )),
+        }
+    }
+}
+
+/// How the agent is permitted to act: interactive review, auto-accept
+/// edits, or full bypass ("yolo"). Selected per run via CLI flags or
+/// read from `config.executor.mode` as the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExecutionMode {
+    Accept,
+    Interactive,
+    Yolo,
+}
+
+impl ExecutionMode {
+    pub const ALL: &'static [Self] = &[Self::Accept, Self::Interactive, Self::Yolo];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Accept => "accept",
+            Self::Interactive => "interactive",
+            Self::Yolo => "yolo",
+        }
+    }
+}
+
+impl fmt::Display for ExecutionMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ExecutionMode {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "accept" => Ok(Self::Accept),
+            "interactive" => Ok(Self::Interactive),
+            "yolo" => Ok(Self::Yolo),
+            other => Err(format!(
+                "unknown mode '{other}' (valid: accept, interactive, yolo)"
+            )),
+        }
+    }
+}
+
+/// Whether the spawned agent is wrapped by a sandbox provider.
+/// `Auto` picks the first installed provider, `Always` errors if none
+/// is available, `Never` runs the agent unrestricted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxPolicy {
+    Auto,
+    Always,
+    Never,
+}
+
+impl SandboxPolicy {
+    pub const ALL: &'static [Self] = &[Self::Auto, Self::Never, Self::Always];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Never => "never",
+            Self::Always => "always",
+        }
+    }
+}
+
+impl fmt::Display for SandboxPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for SandboxPolicy {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "auto" => Ok(Self::Auto),
+            "never" => Ok(Self::Never),
+            "always" => Ok(Self::Always),
+            other => Err(format!(
+                "unknown sandbox policy '{other}' (valid: auto, never, always)"
+            )),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TcConfig {
@@ -50,39 +201,9 @@ impl TcConfig {
         }
 
         // -- Executor --
-        if !matches!(
-            self.executor.default.as_str(),
-            "claude" | "opencode" | "codex" | "pi" | "gemini" | "all"
-        ) {
-            errors.push(CoreError::invalid_config(
-                "executor.default",
-                format!(
-                    "unknown executor '{}' (valid: claude, opencode, codex, pi, gemini, all)",
-                    self.executor.default
-                ),
-            ));
-        }
-        if !matches!(self.executor.mode.as_str(), "accept" | "interactive") {
-            errors.push(CoreError::invalid_config(
-                "executor.mode",
-                format!(
-                    "unknown mode '{}' (valid: accept, interactive)",
-                    self.executor.mode
-                ),
-            ));
-        }
-        if !matches!(
-            self.executor.sandbox.enabled.as_str(),
-            "auto" | "never" | "always"
-        ) {
-            errors.push(CoreError::invalid_config(
-                "executor.sandbox.enabled",
-                format!(
-                    "unknown value '{}' (valid: auto, never, always)",
-                    self.executor.sandbox.enabled
-                ),
-            ));
-        }
+        // `executor.default`, `executor.mode` and `sandbox.enabled` are
+        // typed enums now -- serde rejects bad values at load time, so
+        // we don't need to re-check them here.
 
         // -- Packer --
         if self.packer.token_budget == 0 {
@@ -167,9 +288,9 @@ impl TcConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutorConfig {
     #[serde(default = "default_executor")]
-    pub default: String,
+    pub default: ExecutorKind,
     #[serde(default = "default_mode")]
-    pub mode: String,
+    pub mode: ExecutionMode,
     #[serde(default)]
     pub sandbox: SandboxConfig,
     #[serde(default)]
@@ -202,7 +323,7 @@ pub struct ResolverConfig {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default = "default_resolver_backend")]
-    pub backend: String,
+    pub backend: ExecutorKind,
     #[serde(default = "default_resolver_template")]
     pub template: String,
     #[serde(default = "default_resolver_timeout")]
@@ -226,14 +347,24 @@ impl Default for ResolverConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
     #[serde(default = "default_sandbox_enabled")]
-    pub enabled: String,
+    pub enabled: SandboxPolicy,
     #[serde(default)]
     pub extra_allow: Vec<PathBuf>,
     #[serde(default)]
     pub block_network: bool,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_sandbox_enabled(),
+            extra_allow: vec![],
+            block_network: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -249,7 +380,7 @@ pub struct PackerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TesterConfig {
     #[serde(default = "default_executor")]
-    pub executor: String,
+    pub executor: ExecutorKind,
     #[serde(default)]
     pub mcp: Vec<McpServerConfig>,
     #[serde(default)]
@@ -314,14 +445,14 @@ fn default_max_retries() -> usize {
     0
 }
 
-fn default_executor() -> String {
-    "claude".into()
+fn default_executor() -> ExecutorKind {
+    ExecutorKind::Claude
 }
-fn default_mode() -> String {
-    "accept".into()
+fn default_mode() -> ExecutionMode {
+    ExecutionMode::Accept
 }
-fn default_sandbox_enabled() -> String {
-    "auto".into()
+fn default_sandbox_enabled() -> SandboxPolicy {
+    SandboxPolicy::Auto
 }
 fn default_token_budget() -> usize {
     80_000
@@ -341,8 +472,8 @@ fn default_base_branch() -> String {
 fn default_branch_prefix() -> String {
     "tc/".into()
 }
-fn default_resolver_backend() -> String {
-    "claude".into()
+fn default_resolver_backend() -> ExecutorKind {
+    ExecutorKind::Claude
 }
 fn default_resolver_timeout() -> u64 {
     300
@@ -465,10 +596,10 @@ mod tests {
                 },
             ],
             executor: ExecutorConfig {
-                default: "claude".into(),
-                mode: "accept".into(),
+                default: ExecutorKind::Claude,
+                mode: ExecutionMode::Accept,
                 sandbox: SandboxConfig {
-                    enabled: "auto".into(),
+                    enabled: SandboxPolicy::Auto,
                     extra_allow: vec![],
                     block_network: false,
                 },
@@ -534,29 +665,27 @@ mod tests {
 
     #[test]
     fn invalid_executor_fails() {
-        let mut cfg = valid_config();
-        cfg.executor.default = "vim".into();
-        let err = cfg.validate().unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("error"), "{msg}");
+        let err = "vim".parse::<ExecutorKind>().unwrap_err();
+        assert!(err.contains("unknown"), "{err}");
     }
 
     #[test]
     fn invalid_mode_fails() {
+        let err = "wat".parse::<ExecutionMode>().unwrap_err();
+        assert!(err.contains("unknown"), "{err}");
+    }
+
+    #[test]
+    fn yolo_mode_valid() {
         let mut cfg = valid_config();
-        cfg.executor.mode = "yolo".into();
-        let err = cfg.validate().unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("error"), "{msg}");
+        cfg.executor.mode = ExecutionMode::Yolo;
+        cfg.validate().unwrap();
     }
 
     #[test]
     fn invalid_sandbox_enabled_fails() {
-        let mut cfg = valid_config();
-        cfg.executor.sandbox.enabled = "maybe".into();
-        let err = cfg.validate().unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("error"), "{msg}");
+        let err = "maybe".parse::<SandboxPolicy>().unwrap_err();
+        assert!(err.contains("unknown"), "{err}");
     }
 
     #[test]
@@ -616,22 +745,21 @@ mod tests {
     #[test]
     fn opencode_executor_valid() {
         let mut cfg = valid_config();
-        cfg.executor.default = "opencode".into();
+        cfg.executor.default = ExecutorKind::Opencode;
         cfg.validate().unwrap();
     }
 
     #[test]
     fn gemini_executor_valid() {
         let mut cfg = valid_config();
-        cfg.executor.default = "gemini".into();
+        cfg.executor.default = ExecutorKind::Gemini;
         cfg.validate().unwrap();
     }
 
     #[test]
-    fn all_executor_valid() {
-        let mut cfg = valid_config();
-        cfg.executor.default = "all".into();
-        cfg.validate().unwrap();
+    fn all_executor_rejected() {
+        let err = "all".parse::<ExecutorKind>().unwrap_err();
+        assert!(err.contains("unknown"), "{err}");
     }
 
     #[test]
@@ -644,7 +772,31 @@ mod tests {
     #[test]
     fn interactive_mode_valid() {
         let mut cfg = valid_config();
-        cfg.executor.mode = "interactive".into();
+        cfg.executor.mode = ExecutionMode::Interactive;
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn executor_kind_roundtrip() {
+        for k in ExecutorKind::ALL {
+            assert_eq!(k.as_str().parse::<ExecutorKind>().unwrap(), *k);
+            assert_eq!(format!("{k}"), k.as_str());
+        }
+    }
+
+    #[test]
+    fn execution_mode_roundtrip() {
+        for m in ExecutionMode::ALL {
+            assert_eq!(m.as_str().parse::<ExecutionMode>().unwrap(), *m);
+            assert_eq!(format!("{m}"), m.as_str());
+        }
+    }
+
+    #[test]
+    fn sandbox_policy_roundtrip() {
+        for p in SandboxPolicy::ALL {
+            assert_eq!(p.as_str().parse::<SandboxPolicy>().unwrap(), *p);
+            assert_eq!(format!("{p}"), p.as_str());
+        }
     }
 }

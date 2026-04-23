@@ -314,7 +314,7 @@ mod tests {
             no_mcp: false,
         };
         let config = Some(TesterConfig {
-            executor: "claude".into(),
+            executor: tc_core::config::ExecutorKind::Claude,
             mcp: vec![McpServerConfig {
                 name: "browser".into(),
                 command: "custom-browser-cmd".into(),
@@ -334,7 +334,7 @@ mod tests {
             no_mcp: false,
         };
         let config = Some(TesterConfig {
-            executor: "claude".into(),
+            executor: tc_core::config::ExecutorKind::Claude,
             mcp: vec![
                 McpServerConfig {
                     name: "db".into(),

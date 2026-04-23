@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use tc_core::config::TcConfig;
+use tc_core::config::{ExecutorKind, TcConfig};
 
 use crate::claude::ClaudeExecutor;
 use crate::custom::CustomExecutor;
@@ -29,18 +29,58 @@ impl AnyExecutor {
     }
 }
 
-/// Build an `AnyExecutor` by name, resolving custom backends from `TcConfig`.
+/// Resolve the PATH command that `kind` would invoke on this system.
 ///
-/// Errors:
-/// - `NotFound` if `name` is not one of claude/opencode/codex/pi/gemini.
-/// - `Sandbox` (repurposed as a config error) if a custom backend has no
-///   command configured -- validation should have caught this earlier, but we
-///   double-check to keep the error close to the actual invocation.
-pub fn executor_by_name(name: &str, cfg: &TcConfig) -> Result<AnyExecutor, ExecutorError> {
-    match name {
-        "claude" => Ok(AnyExecutor::Claude(ClaudeExecutor)),
-        "opencode" => Ok(AnyExecutor::Opencode(OpencodeExecutor)),
-        "codex" => {
+/// For `Claude`/`Opencode`, the command is the kind name itself.
+/// For custom backends it comes from `cfg.executor.resolver.backends.*`;
+/// if nothing is configured we fall back to the kind name so PATH lookup
+/// still has something to try.
+pub fn command_for(kind: ExecutorKind, cfg: &TcConfig) -> String {
+    match kind {
+        ExecutorKind::Claude | ExecutorKind::Opencode => kind.as_str().to_string(),
+        ExecutorKind::Codex => cfg
+            .executor
+            .resolver
+            .backends
+            .codex
+            .as_ref()
+            .map(|c| c.command.clone())
+            .unwrap_or_else(|| kind.as_str().to_string()),
+        ExecutorKind::Pi => cfg
+            .executor
+            .resolver
+            .backends
+            .pi
+            .as_ref()
+            .map(|c| c.command.clone())
+            .unwrap_or_else(|| kind.as_str().to_string()),
+        ExecutorKind::Gemini => cfg
+            .executor
+            .resolver
+            .backends
+            .gemini
+            .as_ref()
+            .map(|c| c.command.clone())
+            .unwrap_or_else(|| kind.as_str().to_string()),
+    }
+}
+
+/// Report whether the binary backing `kind` exists on PATH.
+pub fn is_installed(kind: ExecutorKind, cfg: &TcConfig) -> bool {
+    which::which(command_for(kind, cfg)).is_ok()
+}
+
+/// Build an `AnyExecutor` for the given kind, resolving custom backends
+/// from `TcConfig`.
+///
+/// Errors with `Sandbox` (re-used as a config error) when a custom backend
+/// has no command configured -- validation should catch it earlier, but we
+/// double-check here so the error is close to the actual invocation.
+pub fn executor_by_kind(kind: ExecutorKind, cfg: &TcConfig) -> Result<AnyExecutor, ExecutorError> {
+    match kind {
+        ExecutorKind::Claude => Ok(AnyExecutor::Claude(ClaudeExecutor)),
+        ExecutorKind::Opencode => Ok(AnyExecutor::Opencode(OpencodeExecutor)),
+        ExecutorKind::Codex => {
             let c = cfg
                 .executor
                 .resolver
@@ -50,7 +90,7 @@ pub fn executor_by_name(name: &str, cfg: &TcConfig) -> Result<AnyExecutor, Execu
                 .ok_or_else(|| ExecutorError::sandbox("codex backend missing command config"))?;
             Ok(AnyExecutor::Custom(CustomExecutor::codex(c.clone())))
         }
-        "pi" => {
+        ExecutorKind::Pi => {
             let p = cfg
                 .executor
                 .resolver
@@ -60,7 +100,7 @@ pub fn executor_by_name(name: &str, cfg: &TcConfig) -> Result<AnyExecutor, Execu
                 .ok_or_else(|| ExecutorError::sandbox("pi backend missing command config"))?;
             Ok(AnyExecutor::Custom(CustomExecutor::pi(p.clone())))
         }
-        "gemini" => {
+        ExecutorKind::Gemini => {
             let g = cfg
                 .executor
                 .resolver
@@ -70,7 +110,6 @@ pub fn executor_by_name(name: &str, cfg: &TcConfig) -> Result<AnyExecutor, Execu
                 .ok_or_else(|| ExecutorError::sandbox("gemini backend missing command config"))?;
             Ok(AnyExecutor::Custom(CustomExecutor::gemini(g.clone())))
         }
-        _ => Err(ExecutorError::not_found(name)),
     }
 }
 
@@ -112,7 +151,8 @@ mod tests {
 
     fn minimal_cfg() -> TcConfig {
         use tc_core::config::{
-            ExecutorConfig, PackerConfig, SandboxConfig, SpawnConfig, VerificationConfig,
+            ExecutionMode, ExecutorConfig, PackerConfig, SandboxConfig, SpawnConfig,
+            VerificationConfig,
         };
         use tc_core::status::{StatusDef, StatusId};
         TcConfig {
@@ -129,8 +169,8 @@ mod tests {
                 },
             ],
             executor: ExecutorConfig {
-                default: "claude".into(),
-                mode: "accept".into(),
+                default: ExecutorKind::Claude,
+                mode: ExecutionMode::Accept,
                 sandbox: SandboxConfig::default(),
                 resolver: ResolverConfig::default(),
             },
@@ -155,23 +195,23 @@ mod tests {
     }
 
     #[test]
-    fn claude_by_name() {
+    fn claude_by_kind() {
         let cfg = minimal_cfg();
-        let exec = executor_by_name("claude", &cfg).unwrap();
+        let exec = executor_by_kind(ExecutorKind::Claude, &cfg).unwrap();
         assert_eq!(exec.name(), "claude");
     }
 
     #[test]
-    fn opencode_by_name() {
+    fn opencode_by_kind() {
         let cfg = minimal_cfg();
-        let exec = executor_by_name("opencode", &cfg).unwrap();
+        let exec = executor_by_kind(ExecutorKind::Opencode, &cfg).unwrap();
         assert_eq!(exec.name(), "opencode");
     }
 
     #[test]
     fn codex_without_backend_errors() {
         let cfg = minimal_cfg();
-        let result = executor_by_name("codex", &cfg);
+        let result = executor_by_kind(ExecutorKind::Codex, &cfg);
         assert!(matches!(result, Err(ExecutorError::Sandbox { .. })));
     }
 
@@ -185,14 +225,14 @@ mod tests {
             interactive_args: vec![],
         });
         let cfg = cfg_with_resolver(resolver);
-        let exec = executor_by_name("codex", &cfg).unwrap();
+        let exec = executor_by_kind(ExecutorKind::Codex, &cfg).unwrap();
         assert_eq!(exec.name(), "codex");
     }
 
     #[test]
     fn gemini_without_backend_errors() {
         let cfg = minimal_cfg();
-        let result = executor_by_name("gemini", &cfg);
+        let result = executor_by_kind(ExecutorKind::Gemini, &cfg);
         assert!(matches!(result, Err(ExecutorError::Sandbox { .. })));
     }
 
@@ -206,14 +246,26 @@ mod tests {
             interactive_args: vec![],
         });
         let cfg = cfg_with_resolver(resolver);
-        let exec = executor_by_name("gemini", &cfg).unwrap();
+        let exec = executor_by_kind(ExecutorKind::Gemini, &cfg).unwrap();
         assert_eq!(exec.name(), "gemini");
     }
 
     #[test]
-    fn unknown_name_errors() {
+    fn command_for_custom_without_config_falls_back_to_kind_name() {
         let cfg = minimal_cfg();
-        let result = executor_by_name("vim", &cfg);
-        assert!(matches!(result, Err(ExecutorError::NotFound { .. })));
+        assert_eq!(command_for(ExecutorKind::Codex, &cfg), "codex");
+    }
+
+    #[test]
+    fn command_for_custom_uses_configured_command() {
+        let mut resolver = ResolverConfig::default();
+        resolver.backends.pi = Some(CustomBackendConfig {
+            command: "/opt/bin/pi".into(),
+            yolo_args: vec![],
+            accept_args: vec![],
+            interactive_args: vec![],
+        });
+        let cfg = cfg_with_resolver(resolver);
+        assert_eq!(command_for(ExecutorKind::Pi, &cfg), "/opt/bin/pi");
     }
 }

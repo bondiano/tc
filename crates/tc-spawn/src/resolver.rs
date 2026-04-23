@@ -5,9 +5,8 @@ use std::time::Duration;
 use minijinja::Environment;
 use tc_core::config::TcConfig;
 use tc_core::task::TaskId;
-use tc_executor::traits::{
-    ExecutionMode, ExecutionRequest, Executor, SandboxConfig, SandboxPolicy,
-};
+use tc_executor::sandbox::sandbox_from_core;
+use tc_executor::traits::{ExecutionMode, ExecutionRequest, Executor};
 
 use crate::error::SpawnError;
 
@@ -67,7 +66,7 @@ pub async fn try_resolve_rebase_conflict<E: Executor>(
 
     let prompt = render_prompt(&ctx, &files)?;
     let sandbox = sandbox_from_core(&ctx.config.executor.sandbox);
-    let backend = resolver.backend.clone();
+    let backend = resolver.backend.to_string();
     let timeout = Duration::from_secs(resolver.timeout_secs);
 
     let request = ExecutionRequest {
@@ -158,7 +157,7 @@ pub async fn try_resolve_rebase_conflict<E: Executor>(
 
 fn render_prompt(ctx: &ResolveContext<'_>, files: &[String]) -> Result<String, SpawnError> {
     let tpl_src = &ctx.config.executor.resolver.template;
-    let backend = ctx.config.executor.resolver.backend.clone();
+    let backend = ctx.config.executor.resolver.backend.to_string();
 
     let mut env = Environment::new();
     env.add_template("resolver", tpl_src)
@@ -291,19 +290,6 @@ fn restart_rebase(worktree: &Path, base: &str) {
         .args(["rebase", base])
         .current_dir(worktree)
         .output();
-}
-
-fn sandbox_from_core(core: &tc_core::config::SandboxConfig) -> SandboxConfig {
-    let enabled = match core.enabled.as_str() {
-        "always" => SandboxPolicy::Always,
-        "never" => SandboxPolicy::Never,
-        _ => SandboxPolicy::Auto,
-    };
-    SandboxConfig {
-        enabled,
-        extra_allow: core.extra_allow.clone(),
-        block_network: core.block_network,
-    }
 }
 
 fn resolver_log_path(config: &TcConfig, task_id: &TaskId, attempt: usize) -> PathBuf {

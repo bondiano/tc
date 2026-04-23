@@ -139,8 +139,8 @@ fn comma_opens_settings_popup() {
     app.update(Message::Key(KeyCode::Char(','), KeyModifiers::NONE))
         .unwrap();
     let state = app.settings.as_ref().expect("settings open");
-    assert_eq!(state.executor, "claude");
-    assert_eq!(state.mode, "accept");
+    assert_eq!(state.executor, tc_core::config::ExecutorKind::Claude);
+    assert_eq!(state.mode, tc_core::config::ExecutionMode::Accept);
     assert_eq!(state.field, SettingsField::Executor);
     assert!(!state.dirty);
 }
@@ -153,7 +153,7 @@ fn settings_l_cycles_executor_and_marks_dirty() {
     app.update(Message::Key(KeyCode::Char('l'), KeyModifiers::NONE))
         .unwrap();
     let state = app.settings.as_ref().expect("settings open");
-    assert_eq!(state.executor, "opencode");
+    assert_ne!(state.executor, tc_core::config::ExecutorKind::Claude);
     assert!(state.dirty);
 }
 
@@ -177,7 +177,10 @@ fn settings_esc_closes_without_saving() {
     app.update(Message::Key(KeyCode::Esc, KeyModifiers::NONE))
         .unwrap();
     assert!(app.settings.is_none());
-    assert_eq!(app.config.executor.default, "claude");
+    assert_eq!(
+        app.config.executor.default,
+        tc_core::config::ExecutorKind::Claude
+    );
 }
 
 #[test]

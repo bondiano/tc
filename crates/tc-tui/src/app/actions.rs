@@ -1,7 +1,6 @@
-use tc_core::config::TcConfig;
 use tc_core::status::StatusId;
 use tc_core::task::Task;
-use tc_executor::any::executor_by_name;
+use tc_executor::any::executor_by_kind;
 use tc_spawn::merge::{MergeResult, merge_worktree};
 use tc_spawn::process::{WorkerState, WorkerStatus};
 use tc_spawn::worktree::WorktreeManager;
@@ -83,8 +82,7 @@ impl App {
         let worktree_mgr =
             WorktreeManager::new(self.store.root().clone(), self.config.spawn.clone());
 
-        let chosen = resolve_executor_name(&self.config.executor.default, &self.config);
-        let executor = executor_by_name(&chosen, &self.config)
+        let executor = executor_by_kind(self.config.executor.default, &self.config)
             .map_err(|e| TuiError::Render(format!("unknown executor: {e}")))?;
 
         let rt = tokio::runtime::Runtime::new()
@@ -275,54 +273,4 @@ impl App {
         self.toast(&format!("added {}", id.0));
         Ok(())
     }
-}
-
-/// Resolve `"all"` to the first available executor by checking PATH for each
-/// candidate binary. Falls back to `"claude"` when nothing is found so the
-/// caller can surface a clear "not_found" error downstream.
-pub(super) fn resolve_executor_name(name: &str, cfg: &TcConfig) -> String {
-    if name != "all" {
-        return name.to_string();
-    }
-    let candidates: [(&str, String); 5] = [
-        ("claude", "claude".to_string()),
-        ("opencode", "opencode".to_string()),
-        (
-            "codex",
-            cfg.executor
-                .resolver
-                .backends
-                .codex
-                .as_ref()
-                .map(|c| c.command.clone())
-                .unwrap_or_else(|| "codex".to_string()),
-        ),
-        (
-            "pi",
-            cfg.executor
-                .resolver
-                .backends
-                .pi
-                .as_ref()
-                .map(|c| c.command.clone())
-                .unwrap_or_else(|| "pi".to_string()),
-        ),
-        (
-            "gemini",
-            cfg.executor
-                .resolver
-                .backends
-                .gemini
-                .as_ref()
-                .map(|c| c.command.clone())
-                .unwrap_or_else(|| "gemini".to_string()),
-        ),
-    ];
-    'scan: for (alias, cmd) in &candidates {
-        if which::which(cmd).is_ok() {
-            return (*alias).to_string();
-        }
-        continue 'scan;
-    }
-    "claude".to_string()
 }

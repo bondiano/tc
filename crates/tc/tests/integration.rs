@@ -2241,7 +2241,7 @@ fn config_set_invalid_executor_fails() {
 fn config_set_invalid_mode_fails() {
     let dir = setup_project();
     let output = tc_in(dir.path())
-        .args(["config", "set", "executor.mode", "yolo"])
+        .args(["config", "set", "executor.mode", "wat"])
         .output()
         .unwrap();
     assert!(!output.status.success());
