@@ -34,6 +34,15 @@ pub struct StatusDef {
     pub id: StatusId,
     pub label: String,
     pub terminal: bool,
+    /// Marks a status as "work in progress". Active statuses are excluded
+    /// from `ready` computation (a task that's already being worked on is
+    /// not ready to be picked up again).
+    ///
+    /// Defaults to `false` for back-compat with configs that predate this
+    /// field; see [`StatusMachine::new`] for the automatic migration that
+    /// keeps the built-in `in_progress` status active.
+    #[serde(default)]
+    pub active: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -42,7 +51,19 @@ pub struct StatusMachine {
 }
 
 impl StatusMachine {
-    pub fn new(statuses: Vec<StatusDef>) -> Self {
+    pub fn new(mut statuses: Vec<StatusDef>) -> Self {
+        // Back-compat migration: if nothing is marked active and the default
+        // `in_progress` status is present, promote it. This keeps
+        // `compute_ready` correct for configs written before `active` existed,
+        // and stays a no-op for anyone who already set `active: true` on
+        // their custom "wip" status.
+        if !statuses.iter().any(|s| s.active)
+            && let Some(s) = statuses
+                .iter_mut()
+                .find(|s| s.id == StatusId::in_progress())
+        {
+            s.active = true;
+        }
         Self { statuses }
     }
 
@@ -51,6 +72,15 @@ impl StatusMachine {
             .iter()
             .find(|s| s.id == *id)
             .is_some_and(|s| s.terminal)
+    }
+
+    /// Whether a status represents in-flight work. Active statuses are
+    /// excluded from `ready` computation.
+    pub fn is_active(&self, id: &StatusId) -> bool {
+        self.statuses
+            .iter()
+            .find(|s| s.id == *id)
+            .is_some_and(|s| s.active)
     }
 
     pub fn validate(&self, id: &StatusId) -> Result<(), CoreError> {
@@ -78,21 +108,25 @@ mod tests {
                 id: StatusId("todo".into()),
                 label: "Todo".into(),
                 terminal: false,
+                active: false,
             },
             StatusDef {
                 id: StatusId("in_progress".into()),
                 label: "In Progress".into(),
                 terminal: false,
+                active: false,
             },
             StatusDef {
                 id: StatusId("done".into()),
                 label: "Done".into(),
                 terminal: true,
+                active: false,
             },
             StatusDef {
                 id: StatusId("blocked".into()),
                 label: "Blocked".into(),
                 terminal: false,
+                active: false,
             },
         ])
     }
@@ -193,5 +227,51 @@ mod tests {
         assert!(!sm.is_terminal(&StatusId("todo".into())));
         assert!(sm.validate(&StatusId("todo".into())).is_err());
         assert!(sm.statuses().is_empty());
+    }
+
+    #[test]
+    fn legacy_config_auto_promotes_in_progress_active() {
+        // Simulates loading a pre-`active` config from disk: all fields
+        // default to `active: false`, but we expect `in_progress` to
+        // behave as active for `compute_ready`.
+        let sm = StatusMachine::new(vec![
+            StatusDef {
+                id: StatusId("todo".into()),
+                label: "Todo".into(),
+                terminal: false,
+                active: false,
+            },
+            StatusDef {
+                id: StatusId("in_progress".into()),
+                label: "In Progress".into(),
+                terminal: false,
+                active: false,
+            },
+        ]);
+        assert!(sm.is_active(&StatusId("in_progress".into())));
+        assert!(!sm.is_active(&StatusId("todo".into())));
+    }
+
+    #[test]
+    fn explicit_active_custom_status_is_respected() {
+        // A user renamed in_progress to wip and marked it active. The
+        // migration must NOT override their choice (and certainly must
+        // not resurrect an in_progress status).
+        let sm = StatusMachine::new(vec![
+            StatusDef {
+                id: StatusId("todo".into()),
+                label: "Todo".into(),
+                terminal: false,
+                active: false,
+            },
+            StatusDef {
+                id: StatusId("wip".into()),
+                label: "WIP".into(),
+                terminal: false,
+                active: true,
+            },
+        ]);
+        assert!(sm.is_active(&StatusId("wip".into())));
+        assert!(!sm.is_active(&StatusId("todo".into())));
     }
 }

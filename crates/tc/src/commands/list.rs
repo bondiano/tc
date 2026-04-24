@@ -23,6 +23,13 @@ pub fn run(args: ListArgs) -> Result<(), CliError> {
 
     let filtered = filter_tasks(&tasks, &args, &dag, &sm);
 
+    if args.ids_only {
+        for t in &filtered {
+            println!("{}", t.id.0);
+        }
+        return Ok(());
+    }
+
     if filtered.is_empty() {
         println!("No matching tasks.");
         return Ok(());

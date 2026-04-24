@@ -50,6 +50,7 @@ pub fn default_config() -> &'static str {
   - id: in_progress
     label: "In Progress"
     terminal: false
+    active: true
   - id: review
     label: "Review"
     terminal: false

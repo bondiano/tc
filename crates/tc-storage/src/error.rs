@@ -70,6 +70,13 @@ pub enum StorageError {
 
     #[error("config validation failed: {0}")]
     ConfigValidation(#[source] tc_core::error::CoreError),
+
+    #[error("timed out acquiring lock on '{path}' after {seconds}s")]
+    #[diagnostic(
+        code(tc::storage::lock_timeout),
+        help("another tc process is holding the lock; retry or check for stuck processes")
+    )]
+    LockTimeout { path: PathBuf, seconds: u64 },
 }
 
 impl StorageError {

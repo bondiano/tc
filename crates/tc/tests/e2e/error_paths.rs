@@ -86,3 +86,32 @@ fn impl_dry_run_on_done_task() {
         "should reject impl on done task: {out}"
     );
 }
+
+#[test]
+fn test_task_not_found() {
+    let dir = setup_project();
+    let out = tc_fail(dir.path(), &["test", "T-999"]);
+    assert!(
+        out.contains("not found") || out.contains("Not found") || out.contains("T-999"),
+        "tc test should report task not found: {out}"
+    );
+}
+
+#[test]
+fn invalid_plan_template_rejected() {
+    let dir = setup_project();
+    let root = dir.path();
+
+    // Corrupt plan_template to an unclosed minijinja expression
+    let cfg_path = root.join(".tc/config.yaml");
+    let content = fs::read_to_string(&cfg_path).expect("read config");
+    let corrupted = format!("{content}\nplan_template: \"{{{{ unclosed\"\n");
+    fs::write(&cfg_path, corrupted).expect("write config");
+
+    // Any command that loads config should fail with a plan_template error
+    let out = tc_fail(root, &["list"]);
+    assert!(
+        out.contains("plan_template") || out.contains("template"),
+        "should report plan_template validation error: {out}"
+    );
+}

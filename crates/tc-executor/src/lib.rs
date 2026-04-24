@@ -3,6 +3,7 @@ pub mod claude;
 pub mod custom;
 pub mod error;
 pub mod io;
+pub mod log_tail;
 pub mod mock;
 pub mod opencode;
 pub mod sandbox;

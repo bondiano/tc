@@ -1,13 +1,16 @@
 use std::path::Path;
 use std::process::Command;
 
-use tc_core::config::TesterConfig;
+use chrono::Utc;
+use tc_core::config::{TcConfig, TesterConfig};
+use tc_core::status::StatusId;
 use tc_core::task::{Task, TaskId};
-use tc_executor::tester::TesterExecutor;
+use tc_executor::tester::{TesterExecutor, TesterVerdict};
 use tc_executor::traits::{
     ExecutionMode, ExecutionRequest, Executor, McpServer, SandboxConfig, SandboxPolicy,
 };
 use tc_spawn::worktree::WorktreeManager;
+use tc_storage::Store;
 
 use crate::cli::TestArgs;
 use crate::error::CliError;
@@ -25,14 +28,20 @@ Report your findings clearly:
 - What tests pass/fail
 - Whether acceptance criteria are met
 - Any issues or bugs found
-- Whether the code follows project conventions";
+- Whether the code follows project conventions
+
+When you finish testing, you MUST write a verdict file at \
+`.tc/.tester_verdict.json` in the project root before exiting. Format:
+  {\"verdict\": \"pass\"}  -- when all acceptance criteria pass and tests are green.
+  {\"verdict\": \"fail\", \"reason\": \"<concise explanation of what failed and how to fix it>\"}  -- otherwise.
+Write this file exactly once. Do not commit it.";
 
 const DEFAULT_BROWSER_MCP_COMMAND: &str = "npx @anthropic-ai/claude-code-mcp-server-playwright";
 
-pub fn run(args: TestArgs) -> Result<(), CliError> {
+pub async fn run(args: TestArgs) -> Result<(), CliError> {
     let store = tc_storage::Store::discover()?;
     let config = store.load_config()?;
-    let tasks = store.load_tasks()?;
+    let mut tasks = store.load_tasks()?;
     let task_id = TaskId(args.id.clone());
 
     let task = tasks
@@ -69,6 +78,10 @@ pub fn run(args: TestArgs) -> Result<(), CliError> {
     let context_path = store.context_path();
     write_context_file(&context_path, &context)?;
 
+    let verdict_path = store.verdict_path();
+    // Clear any stale verdict from a previous run
+    let _ = std::fs::remove_file(&verdict_path);
+
     let request = ExecutionRequest {
         context,
         mode: ExecutionMode::Interactive,
@@ -83,20 +96,36 @@ pub fn run(args: TestArgs) -> Result<(), CliError> {
 
     let executor = TesterExecutor { system_prompt };
 
-    let rt = tokio::runtime::Runtime::new()
-        .map_err(|e| CliError::user(format!("failed to create runtime: {e}")))?;
-
-    let result = rt.block_on(executor.execute(&request, None))?;
+    let result = executor.execute(&request, None).await?;
 
     let _ = std::fs::remove_file(&context_path);
 
-    if result.exit_code == 0 {
-        output::print_success(&format!("{} testing complete", args.id));
-    } else {
-        output::print_error(&format!(
-            "{} tester exited with code {}",
-            args.id, result.exit_code
-        ));
+    let verdict = tc_executor::tester::read_verdict(&verdict_path)?;
+    let _ = std::fs::remove_file(&verdict_path);
+
+    match verdict {
+        Some(TesterVerdict::Pass { reason }) => {
+            apply_pass(&store, &config, &mut tasks, &task_id, reason.as_deref())?;
+            output::print_success(&format!("{} passed testing", args.id));
+        }
+        Some(TesterVerdict::Fail { reason }) => {
+            let fix_id = apply_fail(&store, &config, &mut tasks, &task_id, &reason)?;
+            output::print_warning(&format!("{} failed testing: {reason}", args.id));
+            output::print_success(&format!("Created fix task: {}", fix_id.0));
+        }
+        None => {
+            if result.exit_code == 0 {
+                output::print_warning(&format!(
+                    "{} tester produced no verdict -- no status change",
+                    args.id
+                ));
+            } else {
+                output::print_error(&format!(
+                    "{} tester exited with code {} and produced no verdict",
+                    args.id, result.exit_code
+                ));
+            }
+        }
     }
 
     Ok(())
@@ -188,6 +217,73 @@ fn write_context_file(path: &Path, content: &str) -> Result<(), CliError> {
     std::fs::write(path, content)
         .map_err(|e| CliError::user(format!("failed to write context: {e}")))?;
     Ok(())
+}
+
+fn apply_pass(
+    store: &Store,
+    config: &TcConfig,
+    tasks: &mut [Task],
+    id: &TaskId,
+    reason: Option<&str>,
+) -> Result<(), CliError> {
+    let idx = tasks
+        .iter()
+        .position(|t| &t.id == id)
+        .ok_or_else(|| tc_core::error::CoreError::TaskNotFound(id.0.clone()))?;
+
+    tasks[idx].status = StatusId(config.verification.on_pass.clone());
+    if let Some(r) = reason {
+        append_note(&mut tasks[idx].notes, &format!("PASS: {r}"));
+    }
+    store.save_tasks(tasks)?;
+    Ok(())
+}
+
+fn apply_fail(
+    store: &Store,
+    config: &TcConfig,
+    tasks: &mut Vec<Task>,
+    id: &TaskId,
+    reason: &str,
+) -> Result<TaskId, CliError> {
+    let idx = tasks
+        .iter()
+        .position(|t| &t.id == id)
+        .ok_or_else(|| tc_core::error::CoreError::TaskNotFound(id.0.clone()))?;
+
+    tasks[idx].status = StatusId(config.verification.on_fail.clone());
+    append_note(&mut tasks[idx].notes, &format!("FAILED: {reason}"));
+
+    let fix_id = store.next_task_id(tasks);
+    let fix = build_fix_task(fix_id.clone(), &tasks[idx], reason);
+    tasks.push(fix);
+
+    store.save_tasks(tasks)?;
+    Ok(fix_id)
+}
+
+fn build_fix_task(fix_id: TaskId, original: &Task, reason: &str) -> Task {
+    Task {
+        id: fix_id,
+        title: format!("Fix: {}", original.title),
+        epic: original.epic.clone(),
+        status: StatusId("todo".to_string()),
+        priority: original.priority,
+        depends_on: vec![original.id.clone()],
+        files: vec![],
+        pack_exclude: vec![],
+        notes: reason.to_string(),
+        acceptance_criteria: vec![],
+        assignee: None,
+        created_at: Utc::now(),
+    }
+}
+
+fn append_note(notes: &mut String, line: &str) {
+    if !notes.is_empty() {
+        notes.push('\n');
+    }
+    notes.push_str(line);
 }
 
 #[cfg(test)]
@@ -362,5 +458,102 @@ mod tests {
         };
         let servers = resolve_mcp_servers(&None, &args);
         assert!(servers.is_empty());
+    }
+
+    // ── build_fix_task ─────────────────────────────────────────────
+
+    #[test]
+    fn build_fix_task_title_prefixed_with_fix() {
+        let original = make_task();
+        let fix = build_fix_task(TaskId("T-002".into()), &original, "login broken");
+        assert_eq!(fix.title, "Fix: Implement login");
+    }
+
+    #[test]
+    fn build_fix_task_copies_epic_and_depends_on_original() {
+        let original = make_task();
+        let fix = build_fix_task(TaskId("T-002".into()), &original, "login broken");
+        assert_eq!(fix.epic, original.epic);
+        assert_eq!(fix.depends_on, vec![original.id.clone()]);
+        assert_eq!(fix.status.0, "todo");
+        assert_eq!(fix.notes, "login broken");
+        assert_eq!(fix.id.0, "T-002");
+    }
+
+    // ── apply_pass / apply_fail ────────────────────────────────────
+
+    fn make_store_with_tasks(tasks: &[Task]) -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = tc_storage::init::init_project(dir.path()).expect("init");
+        store.save_tasks(tasks).expect("save");
+        (dir, store)
+    }
+
+    fn make_config() -> TcConfig {
+        let store_dir = tempfile::tempdir().expect("tempdir");
+        let store = tc_storage::init::init_project(store_dir.path()).expect("init");
+        store.load_config().expect("load")
+    }
+
+    #[test]
+    fn apply_pass_sets_on_pass_status_and_appends_reason() {
+        let task = make_task();
+        let (_dir, store) = make_store_with_tasks(std::slice::from_ref(&task));
+        let config = make_config();
+        let mut tasks = vec![task.clone()];
+
+        apply_pass(&store, &config, &mut tasks, &task.id, Some("all green")).expect("pass");
+
+        assert_eq!(tasks[0].status.0, config.verification.on_pass);
+        assert!(tasks[0].notes.contains("PASS: all green"));
+    }
+
+    #[test]
+    fn apply_pass_without_reason_leaves_notes_empty() {
+        let task = make_task();
+        let (_dir, store) = make_store_with_tasks(std::slice::from_ref(&task));
+        let config = make_config();
+        let mut tasks = vec![task.clone()];
+
+        apply_pass(&store, &config, &mut tasks, &task.id, None).expect("pass");
+
+        assert_eq!(tasks[0].status.0, config.verification.on_pass);
+        assert!(tasks[0].notes.is_empty());
+    }
+
+    #[test]
+    fn apply_fail_sets_on_fail_status_and_creates_fix_task() {
+        let task = make_task();
+        let (_dir, store) = make_store_with_tasks(std::slice::from_ref(&task));
+        let config = make_config();
+        let mut tasks = vec![task.clone()];
+
+        let fix_id =
+            apply_fail(&store, &config, &mut tasks, &task.id, "auth broken").expect("fail");
+
+        assert_eq!(tasks[0].status.0, config.verification.on_fail);
+        assert!(tasks[0].notes.contains("FAILED: auth broken"));
+        assert_eq!(tasks.len(), 2);
+        let fix = &tasks[1];
+        assert_eq!(fix.id, fix_id);
+        assert_eq!(fix.title, "Fix: Implement login");
+        assert_eq!(fix.depends_on, vec![task.id.clone()]);
+        assert_eq!(fix.status.0, "todo");
+        assert_eq!(fix.notes, "auth broken");
+    }
+
+    #[test]
+    fn apply_fail_appends_reason_when_notes_nonempty() {
+        let mut task = make_task();
+        task.notes = "existing note".into();
+        let (_dir, store) = make_store_with_tasks(std::slice::from_ref(&task));
+        let config = make_config();
+        let mut tasks = vec![task.clone()];
+
+        apply_fail(&store, &config, &mut tasks, &task.id, "bug").expect("fail");
+
+        assert!(tasks[0].notes.starts_with("existing note"));
+        assert!(tasks[0].notes.contains("FAILED: bug"));
+        assert!(tasks[0].notes.contains('\n'));
     }
 }

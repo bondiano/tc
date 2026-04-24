@@ -15,6 +15,12 @@ results -- all from a single CLI.
 - **Recovery**: detect orphaned workers after a crash and clean up
 - **Sandbox**: integration with `sbx` (Docker AI Sandboxes) and `nono` (Landlock)
 
+## Platform support
+
+tc is **Unix-only** (macOS and Linux). Windows is not supported -- the worker
+supervision layer relies on POSIX signals and PID semantics. PRs adding Windows
+support (via `windows-sys` for `OpenProcess` / `TerminateProcess`) are welcome.
+
 ## Installation
 
 ```bash
@@ -84,6 +90,31 @@ tc merge T-001
 | `tc kill <id>` / `tc kill --all` | Stop worker(s) |
 | `tc review <id> [--reject "feedback"]` | Diff in pager or reject into notes |
 | `tc merge <id>` / `tc merge --all` | Merge worktree back into main |
+
+## Shell Completions
+
+Generate static completions for your shell:
+
+```sh
+tc completion bash >> ~/.bash_completion
+tc completion zsh  > ~/.zfunc/_tc
+tc completion fish > ~/.config/fish/completions/tc.fish
+```
+
+### Dynamic task ID completion (bash)
+
+`tc list --ids-only` prints one task ID per line. Wire it into bash completion
+so `tc impl <TAB>`, `tc show <TAB>`, `tc test <TAB>`, etc. auto-complete real IDs:
+
+```bash
+_tc_task_ids() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    COMPREPLY=( $(compgen -W "$(tc list --ids-only 2>/dev/null)" -- "$cur") )
+}
+complete -F _tc_task_ids tc
+```
+
+Drop this in `~/.bashrc` after the line that sources `tc completion bash`.
 
 ## Architecture
 

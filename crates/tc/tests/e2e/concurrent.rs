@@ -1,20 +1,15 @@
 use crate::helpers::{setup_project, tc_in, tc_run};
 
-/// Spawn N `tc add` processes concurrently, then verify all tasks were persisted.
-///
-/// This is a best-effort race-condition smoke test: without file locking in
-/// tc-storage, concurrent writes can clobber each other (last-writer-wins).
-/// The test documents the current behaviour -- if we add locking later, all N
-/// tasks should survive.
+/// Spawn N `tc add` processes concurrently. With file locking in place, ALL N
+/// adds must succeed and ALL N tasks must be persisted with unique IDs.
 #[test]
-fn concurrent_adds_do_not_corrupt_yaml() {
+fn concurrent_adds_preserve_all_tasks() {
     let dir = setup_project();
     let root = dir.path();
 
     let n = 6;
     let mut children = Vec::with_capacity(n);
 
-    // Spawn N `tc add` processes at once
     for i in 0..n {
         let child = tc_in(root)
             .args(["add", &format!("Concurrent task {i}"), "--epic", "race"])
@@ -25,7 +20,6 @@ fn concurrent_adds_do_not_corrupt_yaml() {
         children.push(child);
     }
 
-    // Wait for all
     let mut successes = 0;
     for mut child in children {
         let status = child.wait().expect("wait for child");
@@ -34,39 +28,38 @@ fn concurrent_adds_do_not_corrupt_yaml() {
         }
     }
 
-    // At minimum one should succeed; ideally all N
-    assert!(
-        successes > 0,
-        "at least one concurrent tc add should succeed"
+    assert_eq!(
+        successes, n,
+        "all {n} concurrent tc add processes must succeed under locking",
     );
 
-    // The YAML file should still be valid (tc list should not crash)
+    // All N distinct task IDs must be present in the list.
     let out = tc_run(root, &["list"]);
-    assert!(
-        out.contains("race"),
-        "list should show tasks from the 'race' epic: {out}"
-    );
+    for i in 0..n {
+        let needle = format!("Concurrent task {i}");
+        assert!(
+            out.contains(&needle),
+            "task '{needle}' missing from list output:\n{out}"
+        );
+    }
 
-    // Verify we can still add tasks (file not corrupted)
-    tc_run(root, &["add", "Post-race task", "--epic", "race"]);
-    let out = tc_run(root, &["list"]);
+    let validate = tc_in(root).arg("validate").output().expect("validate");
     assert!(
-        out.contains("Post-race task"),
-        "should be able to add after concurrent writes"
+        validate.status.success(),
+        "validate failed after concurrent adds: {}",
+        String::from_utf8_lossy(&validate.stderr)
     );
 }
 
-/// Two processes: one adds a task, the other marks a different task as done.
-/// Both touch tasks.yaml -- verify neither operation is lost.
+/// Two processes: one adds a task, the other marks a seed task as done.
+/// Both touch tasks.yaml -- with locking both must succeed and neither loses work.
 #[test]
-fn concurrent_add_and_done() {
+fn concurrent_add_and_done_both_persist() {
     let dir = setup_project();
     let root = dir.path();
 
-    // Seed a task to mark as done
     tc_run(root, &["add", "Seed task", "--epic", "test"]);
 
-    // Spawn both concurrently
     let add_child = tc_in(root)
         .args(["add", "New task", "--epic", "test"])
         .stdout(std::process::Stdio::piped())
@@ -84,19 +77,27 @@ fn concurrent_add_and_done() {
     let add_status = add_child.wait_with_output().expect("wait add");
     let done_status = done_child.wait_with_output().expect("wait done");
 
-    // Both should at least not crash / corrupt the file
-    // (one may fail due to race, but the file must remain valid)
-    let _add_ok = add_status.status.success();
-    let _done_ok = done_status.status.success();
+    assert!(
+        add_status.status.success(),
+        "add should succeed under locking: {}",
+        String::from_utf8_lossy(&add_status.stderr)
+    );
+    assert!(
+        done_status.status.success(),
+        "done should succeed under locking: {}",
+        String::from_utf8_lossy(&done_status.stderr)
+    );
 
-    // The file must still be parseable
     let out = tc_run(root, &["list"]);
     assert!(
         out.contains("Seed task"),
         "seed task should still exist: {out}"
     );
+    assert!(
+        out.contains("New task"),
+        "new task should have been persisted: {out}"
+    );
 
-    // tc validate should not report corruption
     let validate = tc_in(root).arg("validate").output().expect("validate");
     assert!(
         validate.status.success(),
@@ -118,13 +119,60 @@ fn rapid_sequential_adds_preserve_id_sequence() {
 
     let out = tc_run(root, &["list"]);
 
-    // All 20 tasks should be present
     for i in 1..=n {
         let id = format!("T-{i:03}");
         assert!(out.contains(&id), "missing {id} in list output: {out}");
     }
 
-    // Validate DAG
+    let validate = tc_in(root).arg("validate").output().expect("validate");
+    assert!(validate.status.success());
+}
+
+/// Simulate a write interrupted mid-stream by verifying that atomic rename
+/// leaves no partially-written tasks.yaml after repeated concurrent writers.
+/// If atomicity is broken, one of the reads will fail parsing.
+#[test]
+fn concurrent_writers_never_leave_partial_yaml() {
+    let dir = setup_project();
+    let root = dir.path();
+
+    // Seed a few so the file is non-trivial.
+    for i in 0..3 {
+        tc_run(root, &["add", &format!("Seed {i}"), "--epic", "atom"]);
+    }
+
+    let writers = 4;
+    let mut children = Vec::with_capacity(writers);
+    for i in 0..writers {
+        let child = tc_in(root)
+            .args(["add", &format!("Atomic {i}"), "--epic", "atom"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn writer");
+        children.push(child);
+    }
+
+    // While writers race, repeatedly parse the file: every read must succeed.
+    let tasks_yaml = root.join(".tc/tasks.yaml");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    let mut reads = 0;
+    while std::time::Instant::now() < deadline {
+        if let Ok(content) = std::fs::read_to_string(&tasks_yaml)
+            && !content.is_empty()
+        {
+            serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&content)
+                .expect("tasks.yaml must always be parseable during concurrent writes");
+            reads += 1;
+        }
+    }
+
+    for mut child in children {
+        child.wait().expect("wait writer");
+    }
+
+    assert!(reads > 0, "the test must have exercised at least one read");
+
     let validate = tc_in(root).arg("validate").output().expect("validate");
     assert!(validate.status.success());
 }

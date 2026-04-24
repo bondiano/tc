@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::error::ExecutorError;
-use crate::io::pipe_child_to_log;
+use crate::io::spawn_and_wait;
 use crate::sandbox::{detect_provider, wrap_with_sandbox};
 use crate::traits::{ExecutionMode, ExecutionRequest, ExecutionResult, Executor};
 
@@ -59,7 +59,7 @@ impl Executor for ClaudeExecutor {
                 &provider,
                 &request.sandbox,
                 &request.working_dir,
-            )
+            )?
         } else {
             (Self::PROGRAM.to_string(), base_args)
         };
@@ -76,35 +76,8 @@ impl Executor for ClaudeExecutor {
         request: &ExecutionRequest,
         log_sink: Option<&Path>,
     ) -> Result<ExecutionResult, ExecutorError> {
-        let mut cmd = self.build_command(request)?;
-
-        if log_sink.is_some() {
-            cmd.stdout(std::process::Stdio::piped());
-            cmd.stderr(std::process::Stdio::piped());
-        }
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| ExecutorError::spawn_failed(Self::PROGRAM, e))?;
-
-        let log_path = if let Some(sink) = log_sink {
-            pipe_child_to_log(&mut child, sink)?;
-            Some(sink.to_path_buf())
-        } else {
-            None
-        };
-
-        let status = child
-            .wait()
-            .await
-            .map_err(|e| ExecutorError::spawn_failed(Self::PROGRAM, e))?;
-
-        let exit_code = status.code().unwrap_or(-1);
-
-        Ok(ExecutionResult {
-            exit_code,
-            log_path,
-        })
+        let cmd = self.build_command(request)?;
+        spawn_and_wait(cmd, log_sink, Self::PROGRAM).await
     }
 }
 

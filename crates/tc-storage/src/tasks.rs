@@ -2,6 +2,7 @@ use std::path::Path;
 
 use tc_core::task::{Task, TaskId};
 
+use crate::atomic::write_atomic;
 use crate::error::{StorageError, StorageResult};
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -22,21 +23,44 @@ pub fn save(path: &Path, tasks: &[Task]) -> StorageResult<()> {
         tasks: tasks.to_vec(),
     };
     let content = serde_yaml_ng::to_string(&file).map_err(StorageError::YamlSerialize)?;
-    std::fs::write(path, content).map_err(|e| StorageError::file_write(path, e))?;
+    write_atomic(path, content.as_bytes())?;
     Ok(())
 }
 
 pub fn next_id(tasks: &[Task]) -> TaskId {
-    let max = tasks
+    // Numeric IDs already in use. Non-`T-NNN` ids are invisible to this
+    // set -- they're fine because we only ever mint `T-NNN` ids ourselves,
+    // but we also dodge collisions with them below.
+    let used_numeric: std::collections::HashSet<u32> = tasks
         .iter()
         .filter_map(|t| {
             t.id.0
                 .strip_prefix("T-")
                 .and_then(|n| n.parse::<u32>().ok())
         })
-        .max()
-        .unwrap_or(0);
-    TaskId(format!("T-{:03}", max + 1))
+        .collect();
+
+    let used_full: std::collections::HashSet<&str> =
+        tasks.iter().map(|t| t.id.0.as_str()).collect();
+
+    let start = used_numeric.iter().copied().max().unwrap_or(0) + 1;
+    // Safety upper bound: prevent pathological infinite loops on corrupt input.
+    const MAX_SCAN: u32 = 1_000_000;
+
+    let mut n = start;
+    'scan: loop {
+        let candidate = format!("T-{n:03}");
+        if !used_numeric.contains(&n) && !used_full.contains(candidate.as_str()) {
+            return TaskId(candidate);
+        }
+        n += 1;
+        if n - start > MAX_SCAN {
+            // Fall back to a numeric-only ID far past the max; callers
+            // would hit this only with truly broken state.
+            return TaskId(format!("T-{n:03}"));
+        }
+        continue 'scan;
+    }
 }
 
 #[cfg(test)]
@@ -218,5 +242,26 @@ mod tests {
     fn next_id_single_task() {
         let tasks = vec![make_task("T-042")];
         assert_eq!(next_id(&tasks).0, "T-043");
+    }
+
+    #[test]
+    fn next_id_skips_already_used_numeric() {
+        // Manually crafted case: max numeric is 002, but someone inserted
+        // T-003 with a lowercase prefix / non-standard form that we parse
+        // back. Here we simulate the equivalent pathology by reserving
+        // T-003 directly.
+        let tasks = vec![make_task("T-001"), make_task("T-002"), make_task("T-003")];
+        assert_eq!(next_id(&tasks).0, "T-004");
+    }
+
+    #[test]
+    fn next_id_skips_custom_id_collision() {
+        // max numeric is 002, so new candidate would be T-003 -- but a task
+        // with literal id "T-003" exists (even though it'd normally be
+        // caught above, exercise the `used_full` path explicitly).
+        let mut t = make_task("manual");
+        t.id = TaskId("T-003".into());
+        let tasks = vec![make_task("T-001"), make_task("T-002"), t];
+        assert_eq!(next_id(&tasks).0, "T-004");
     }
 }

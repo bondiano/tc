@@ -198,6 +198,29 @@ fn list_ready_filter() {
 }
 
 #[test]
+fn list_ids_only_prints_ids() {
+    let dir = setup_project();
+    tc_in(dir.path())
+        .args(["add", "Task A", "--epic", "be"])
+        .output()
+        .unwrap();
+    tc_in(dir.path())
+        .args(["add", "Task B", "--epic", "fe"])
+        .output()
+        .unwrap();
+
+    let output = tc_in(dir.path())
+        .args(["list", "--ids-only"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.trim(), "T-001\nT-002");
+    assert!(!stdout.contains("Task A"));
+    assert!(!stdout.contains("[be]"));
+}
+
+#[test]
 fn show_task() {
     let dir = setup_project();
     tc_in(dir.path())

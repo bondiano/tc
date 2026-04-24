@@ -1,8 +1,44 @@
 use std::path::Path;
 
+use serde::Deserialize;
+
 use crate::error::ExecutorError;
-use crate::io::pipe_child_to_log;
+use crate::io::spawn_and_wait;
 use crate::traits::{ExecutionMode, ExecutionRequest, ExecutionResult, Executor};
+
+/// Verdict written by the tester agent to `.tc/.tester_verdict.json` before exit.
+///
+/// The agent is instructed (via system prompt) to write exactly one of:
+/// - `{"verdict":"pass"}` when all acceptance criteria pass.
+/// - `{"verdict":"fail","reason":"..."}` otherwise.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(tag = "verdict", rename_all = "lowercase")]
+pub enum TesterVerdict {
+    Pass {
+        #[serde(default)]
+        reason: Option<String>,
+    },
+    Fail {
+        reason: String,
+    },
+}
+
+/// Read a verdict file.
+///
+/// Returns `Ok(None)` if the file does not exist (inconclusive -- the tester
+/// did not produce a verdict). Returns `Ok(Some(_))` on successful parse and
+/// `Err` on I/O failure or malformed JSON.
+pub fn read_verdict(path: &Path) -> Result<Option<TesterVerdict>, ExecutorError> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(ExecutorError::verdict_read(path, e)),
+    };
+
+    let verdict = serde_json::from_slice::<TesterVerdict>(&bytes)
+        .map_err(|e| ExecutorError::verdict_parse(path, e))?;
+    Ok(Some(verdict))
+}
 
 /// Executor that runs Claude as a testing/verification agent.
 ///
@@ -71,35 +107,8 @@ impl Executor for TesterExecutor {
         request: &ExecutionRequest,
         log_sink: Option<&Path>,
     ) -> Result<ExecutionResult, ExecutorError> {
-        let mut cmd = self.build_command(request)?;
-
-        if log_sink.is_some() {
-            cmd.stdout(std::process::Stdio::piped());
-            cmd.stderr(std::process::Stdio::piped());
-        }
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| ExecutorError::spawn_failed(Self::PROGRAM, e))?;
-
-        let log_path = if let Some(sink) = log_sink {
-            pipe_child_to_log(&mut child, sink)?;
-            Some(sink.to_path_buf())
-        } else {
-            None
-        };
-
-        let status = child
-            .wait()
-            .await
-            .map_err(|e| ExecutorError::spawn_failed(Self::PROGRAM, e))?;
-
-        let exit_code = status.code().unwrap_or(-1);
-
-        Ok(ExecutionResult {
-            exit_code,
-            log_path,
-        })
+        let cmd = self.build_command(request)?;
+        spawn_and_wait(cmd, log_sink, Self::PROGRAM).await
     }
 }
 
@@ -223,5 +232,61 @@ mod tests {
         assert!(args.contains(&"--print".to_string()));
         assert!(args.contains(&"--system-prompt".to_string()));
         assert_eq!(args.iter().filter(|a| *a == "--mcp-server").count(), 1);
+    }
+
+    // ── read_verdict ────────────────────────────────────────────────
+
+    #[test]
+    fn read_verdict_pass() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("verdict.json");
+        std::fs::write(&path, r#"{"verdict":"pass"}"#).expect("write");
+        let v = read_verdict(&path).expect("read").expect("some");
+        assert_eq!(v, TesterVerdict::Pass { reason: None });
+    }
+
+    #[test]
+    fn read_verdict_pass_with_reason() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("verdict.json");
+        std::fs::write(&path, r#"{"verdict":"pass","reason":"all green"}"#).expect("write");
+        let v = read_verdict(&path).expect("read").expect("some");
+        assert_eq!(
+            v,
+            TesterVerdict::Pass {
+                reason: Some("all green".into())
+            }
+        );
+    }
+
+    #[test]
+    fn read_verdict_fail_with_reason() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("verdict.json");
+        std::fs::write(&path, r#"{"verdict":"fail","reason":"login flow broken"}"#).expect("write");
+        let v = read_verdict(&path).expect("read").expect("some");
+        assert_eq!(
+            v,
+            TesterVerdict::Fail {
+                reason: "login flow broken".into()
+            }
+        );
+    }
+
+    #[test]
+    fn read_verdict_missing_returns_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("does-not-exist.json");
+        let v = read_verdict(&path).expect("read");
+        assert!(v.is_none());
+    }
+
+    #[test]
+    fn read_verdict_malformed_returns_err() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("bad.json");
+        std::fs::write(&path, r#"{"verdict":"maybe"}"#).expect("write");
+        let err = read_verdict(&path).unwrap_err();
+        assert!(matches!(err, ExecutorError::VerdictParse { .. }));
     }
 }

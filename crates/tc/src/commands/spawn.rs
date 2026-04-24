@@ -1,11 +1,11 @@
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 use tc_core::dag::TaskDag;
 use tc_core::status::StatusMachine;
 use tc_core::task::TaskId;
+use tc_executor::log_tail;
 use tc_spawn::process::WorkerState;
 use tc_spawn::recovery;
 use tc_spawn::scheduler::list_worker_states;
@@ -15,7 +15,7 @@ use crate::cli::{AttachArgs, KillArgs, LogsArgs, SpawnArgs, WorkersArgs};
 use crate::error::CliError;
 use crate::output;
 
-pub fn run(args: SpawnArgs) -> Result<(), CliError> {
+pub async fn run(args: SpawnArgs) -> Result<(), CliError> {
     let store = tc_storage::Store::discover()?;
     let config = store.load_config()?;
     let tasks = store.load_tasks()?;
@@ -60,9 +60,6 @@ pub fn run(args: SpawnArgs) -> Result<(), CliError> {
         _ => build_executor_claude(),
     };
 
-    let rt = tokio::runtime::Runtime::new()
-        .map_err(|e| CliError::user(format!("failed to create runtime: {e}")))?;
-
     let count = task_ids.len();
     if count > max_parallel {
         output::print_success(&format!(
@@ -75,26 +72,24 @@ pub fn run(args: SpawnArgs) -> Result<(), CliError> {
     let detach = args.detach;
     let no_tmux = args.no_tmux;
 
-    rt.block_on(async {
-        match executor {
-            ExecutorKind::Claude(exec) => {
-                let mut scheduler =
-                    tc_spawn::scheduler::Scheduler::new(exec, worktree_mgr, max_parallel);
-                if no_tmux {
-                    scheduler.use_tmux = false;
-                }
-                drive_workers(scheduler, task_ids, &store, &config, detach).await
+    match executor {
+        ExecutorKind::Claude(exec) => {
+            let mut scheduler =
+                tc_spawn::scheduler::Scheduler::new(exec, worktree_mgr, max_parallel);
+            if no_tmux {
+                scheduler.use_tmux = false;
             }
-            ExecutorKind::Opencode(exec) => {
-                let mut scheduler =
-                    tc_spawn::scheduler::Scheduler::new(exec, worktree_mgr, max_parallel);
-                if no_tmux {
-                    scheduler.use_tmux = false;
-                }
-                drive_workers(scheduler, task_ids, &store, &config, detach).await
-            }
+            drive_workers(scheduler, task_ids, &store, &config, detach).await
         }
-    })
+        ExecutorKind::Opencode(exec) => {
+            let mut scheduler =
+                tc_spawn::scheduler::Scheduler::new(exec, worktree_mgr, max_parallel);
+            if no_tmux {
+                scheduler.use_tmux = false;
+            }
+            drive_workers(scheduler, task_ids, &store, &config, detach).await
+        }
+    }
 }
 
 async fn drive_workers<E: tc_executor::traits::Executor>(
@@ -323,34 +318,9 @@ fn follow_log(log_path: &std::path::Path) -> Result<(), CliError> {
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&interrupted))
         .map_err(|e| CliError::user(format!("failed to register signal handler: {e}")))?;
 
-    let file = std::fs::File::open(log_path)
-        .map_err(|e| CliError::user(format!("failed to open log: {e}")))?;
-    let mut reader = BufReader::new(file);
-
-    // Read existing content first
-    let mut line = String::new();
-    loop {
-        line.clear();
-        match reader.read_line(&mut line) {
-            Ok(0) => break,
-            Ok(_) => print!("{line}"),
-            Err(e) => return Err(CliError::user(format!("read error: {e}"))),
-        }
-    }
-
-    // Then tail until interrupted
-    while !interrupted.load(Ordering::Relaxed) {
-        line.clear();
-        match reader.read_line(&mut line) {
-            Ok(0) => {
-                std::thread::sleep(std::time::Duration::from_millis(200));
-            }
-            Ok(_) => print!("{line}"),
-            Err(e) => return Err(CliError::user(format!("read error: {e}"))),
-        }
-    }
-
-    Ok(())
+    let mut stdout = std::io::stdout().lock();
+    log_tail::follow_to_writer(log_path, &mut stdout, &interrupted)
+        .map_err(|e| CliError::user(format!("failed to tail log: {e}")))
 }
 
 fn send_sigterm_and_mark_killed(

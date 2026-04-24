@@ -220,3 +220,21 @@ fn completion_outputs() {
         );
     }
 }
+
+#[test]
+fn list_ids_only_for_completion() {
+    let dir = setup_project();
+    let root = dir.path();
+
+    tc_run(root, &["add", "First task", "--epic", "a"]);
+    tc_run(root, &["add", "Second task", "--epic", "b"]);
+    tc_run(root, &["add", "Third task", "--epic", "a"]);
+
+    let out = tc_run(root, &["list", "--ids-only"]);
+    assert_eq!(out.trim(), "T-001\nT-002\nT-003");
+    assert!(!out.contains("First task"));
+
+    // Combined with filter: --ids-only should honor --epic
+    let out = tc_run(root, &["list", "--ids-only", "--epic", "a"]);
+    assert_eq!(out.trim(), "T-001\nT-003");
+}

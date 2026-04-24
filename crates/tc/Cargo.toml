@@ -31,9 +31,11 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 chrono = { workspace = true }
 which = { workspace = true }
-libc = "0.2"
-signal-hook = "0.4"
 tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+signal-hook = "0.3"
 serde_yaml_ng = { workspace = true }
 reqwest = { workspace = true }
 serde_json = { workspace = true }

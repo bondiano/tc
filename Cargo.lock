@@ -501,7 +501,7 @@ dependencies = [
  "mio",
  "parking_lot",
  "rustix",
- "signal-hook 0.3.18",
+ "signal-hook",
  "signal-hook-mio",
  "winapi",
 ]
@@ -819,6 +819,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "fs4"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f8fa43de52e33bb8fc545448eb07d6e6248971c5d6b4947937e9395f6ff339d"
+dependencies = [
+ "rustix",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2596,16 +2606,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "signal-hook"
-version = "0.4.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2a0c28ca5908dbdbcd52e6fdaa00358ab88637f8ab33e1f188dd510eb44b53d"
-dependencies = [
- "libc",
- "signal-hook-registry",
-]
-
-[[package]]
 name = "signal-hook-mio"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2613,7 +2613,7 @@ checksum = "b75a19a7a740b25bc7944bdee6172368f988763b744e3d4dfe753f6b4ece40cc"
 dependencies = [
  "libc",
  "mio",
- "signal-hook 0.3.18",
+ "signal-hook",
 ]
 
 [[package]]
@@ -2803,7 +2803,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml_ng",
- "signal-hook 0.4.4",
+ "signal-hook",
  "tc-core",
  "tc-executor",
  "tc-packer",
@@ -2833,6 +2833,8 @@ name = "tc-executor"
 version = "0.1.0"
 dependencies = [
  "miette",
+ "serde",
+ "serde_json",
  "tc-core",
  "tempfile",
  "thiserror 2.0.18",
@@ -2876,6 +2878,7 @@ name = "tc-storage"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "fs4",
  "miette",
  "serde",
  "serde_yaml_ng",
@@ -2976,7 +2979,7 @@ dependencies = [
  "pest_derive",
  "phf",
  "sha2",
- "signal-hook 0.3.18",
+ "signal-hook",
  "siphasher",
  "terminfo",
  "termios",

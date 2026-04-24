@@ -161,11 +161,13 @@ mod tests {
                     id: StatusId("todo".into()),
                     label: "Todo".into(),
                     terminal: false,
+                    active: false,
                 },
                 StatusDef {
                     id: StatusId("done".into()),
                     label: "Done".into(),
                     terminal: true,
+                    active: false,
                 },
             ],
             executor: ExecutorConfig {

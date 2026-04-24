@@ -1,3 +1,4 @@
+pub mod atomic;
 pub mod config;
 pub mod error;
 pub mod init;
@@ -38,11 +39,24 @@ impl Store {
     }
 
     pub fn load_tasks(&self) -> StorageResult<Vec<Task>> {
-        tasks::load(&self.tasks_path())
+        atomic::with_exclusive_lock(&self.lock_path(), || tasks::load(&self.tasks_path()))
     }
 
     pub fn save_tasks(&self, tasks: &[Task]) -> StorageResult<()> {
-        tasks::save(&self.tasks_path(), tasks)
+        atomic::with_exclusive_lock(&self.lock_path(), || tasks::save(&self.tasks_path(), tasks))
+    }
+
+    /// Atomically read-modify-write tasks under a single held lock, avoiding
+    /// the TOCTOU race between separate `load_tasks` + `save_tasks` calls.
+    pub fn update_tasks<F>(&self, f: F) -> StorageResult<()>
+    where
+        F: FnOnce(&mut Vec<Task>) -> StorageResult<()>,
+    {
+        atomic::with_exclusive_lock(&self.lock_path(), || {
+            let mut tasks = tasks::load(&self.tasks_path())?;
+            f(&mut tasks)?;
+            tasks::save(&self.tasks_path(), &tasks)
+        })
     }
 
     pub fn next_task_id(&self, tasks: &[Task]) -> TaskId {
@@ -50,11 +64,13 @@ impl Store {
     }
 
     pub fn load_config(&self) -> StorageResult<TcConfig> {
-        config::load(&self.config_path())
+        atomic::with_exclusive_lock(&self.lock_path(), || config::load(&self.config_path()))
     }
 
     pub fn save_config(&self, config: &TcConfig) -> StorageResult<()> {
-        config::save(&self.config_path(), config)
+        atomic::with_exclusive_lock(&self.lock_path(), || {
+            config::save(&self.config_path(), config)
+        })
     }
 
     pub fn root(&self) -> &PathBuf {
@@ -67,6 +83,10 @@ impl Store {
 
     pub fn context_path(&self) -> PathBuf {
         self.tc_dir().join("TASK_CONTEXT.md")
+    }
+
+    pub fn verdict_path(&self) -> PathBuf {
+        self.tc_dir().join(".tester_verdict.json")
     }
 
     pub fn log_path(&self, id: &TaskId) -> PathBuf {
@@ -91,6 +111,12 @@ impl Store {
 
     pub fn config_path(&self) -> PathBuf {
         self.tc_dir().join("config.yaml")
+    }
+
+    /// Single lock protecting both tasks.yaml and config.yaml. Parallel
+    /// load/save from multiple `tc` processes serialize through this file.
+    fn lock_path(&self) -> PathBuf {
+        self.tc_dir().join(".store.lock")
     }
 
     pub fn draft_add_task_path(&self) -> PathBuf {

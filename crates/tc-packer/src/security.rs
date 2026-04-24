@@ -1,11 +1,25 @@
 /// Scan content for potential secrets (API keys, tokens, private keys, etc.)
 /// Returns a list of human-readable descriptions for each detected secret.
+///
+/// Implementation note: each line is lowercased *once* (ASCII fast-path) and
+/// the result is threaded through every detector. Detectors that need the
+/// original casing (AWS AKIA, GitHub `ghp_` prefixes) receive both views.
+/// Previously each detector called `line.to_lowercase()` itself, which
+/// allocated `O(detectors) = 12` copies per line -- noticeable on large packs.
 pub fn scan_for_secrets(content: &str) -> Vec<String> {
     let mut findings = Vec::new();
+    let mut lower = String::new();
 
     for line in content.lines() {
+        // ASCII-lowercase is enough for the tokens we detect (all English,
+        // all ASCII), and it sidesteps the Unicode table lookups that
+        // `str::to_lowercase` does per char.
+        lower.clear();
+        lower.push_str(line);
+        lower.make_ascii_lowercase();
+
         for (pattern_fn, description) in DETECTORS {
-            if pattern_fn(line) {
+            if pattern_fn(line, &lower) {
                 findings.push(description.to_string());
             }
         }
@@ -14,7 +28,7 @@ pub fn scan_for_secrets(content: &str) -> Vec<String> {
     findings
 }
 
-type Detector = (fn(&str) -> bool, &'static str);
+type Detector = (fn(&str, &str) -> bool, &'static str);
 
 const DETECTORS: &[Detector] = &[
     (detect_aws_access_key, "AWS access key (AKIA...)"),
@@ -37,8 +51,8 @@ const DETECTORS: &[Detector] = &[
     ),
 ];
 
-fn detect_aws_access_key(line: &str) -> bool {
-    // AWS access key IDs start with AKIA and are 20 chars
+fn detect_aws_access_key(line: &str, _lower: &str) -> bool {
+    // AWS access key IDs start with AKIA (case-sensitive) and are 20 chars
     let Some(pos) = line.find("AKIA") else {
         return false;
     };
@@ -46,14 +60,13 @@ fn detect_aws_access_key(line: &str) -> bool {
     after.len() >= 20 && after[..20].chars().all(|c| c.is_ascii_alphanumeric())
 }
 
-fn detect_aws_secret_key(line: &str) -> bool {
-    // Looks for aws_secret_access_key or AWS_SECRET_ACCESS_KEY assignments
-    let lower = line.to_lowercase();
+fn detect_aws_secret_key(line: &str, lower: &str) -> bool {
     (lower.contains("aws_secret_access_key") || lower.contains("aws_secret_key"))
         && contains_value_assignment(line)
 }
 
-fn detect_github_token(line: &str) -> bool {
+fn detect_github_token(line: &str, _lower: &str) -> bool {
+    // Prefixes are case-sensitive; never lowered upstream.
     line.contains("ghp_")
         || line.contains("gho_")
         || line.contains("ghs_")
@@ -61,7 +74,7 @@ fn detect_github_token(line: &str) -> bool {
         || line.contains("github_pat_")
 }
 
-fn detect_openai_key(line: &str) -> bool {
+fn detect_openai_key(line: &str, _lower: &str) -> bool {
     // sk- followed by enough alphanumeric chars, but not sk-ant-
     if let Some(pos) = line.find("sk-") {
         let after = &line[pos..];
@@ -71,45 +84,43 @@ fn detect_openai_key(line: &str) -> bool {
     }
 }
 
-fn detect_anthropic_key(line: &str) -> bool {
+fn detect_anthropic_key(line: &str, _lower: &str) -> bool {
     line.contains("sk-ant-")
 }
 
-fn detect_private_key_header(line: &str) -> bool {
+fn detect_private_key_header(line: &str, _lower: &str) -> bool {
     line.contains("-----BEGIN") && line.contains("PRIVATE KEY-----")
 }
 
-fn detect_generic_api_key(line: &str) -> bool {
-    let lower = line.to_lowercase();
+fn detect_generic_api_key(line: &str, lower: &str) -> bool {
     (lower.contains("api_key") || lower.contains("apikey") || lower.contains("api-key"))
         && contains_value_assignment(line)
-        && !is_likely_placeholder(&lower)
+        && !is_likely_placeholder(lower)
 }
 
-fn detect_generic_secret(line: &str) -> bool {
-    let lower = line.to_lowercase();
+fn detect_generic_secret(line: &str, lower: &str) -> bool {
     (lower.contains("secret_key") || lower.contains("secret-key") || lower.contains("secretkey"))
         && contains_value_assignment(line)
-        && !is_likely_placeholder(&lower)
+        && !is_likely_placeholder(lower)
 }
 
-fn detect_password_assignment(line: &str) -> bool {
-    let lower = line.to_lowercase();
+fn detect_password_assignment(_line: &str, lower: &str) -> bool {
     (lower.contains("password=") || lower.contains("password =") || lower.contains("password:"))
-        && !is_likely_placeholder(&lower)
+        && !is_likely_placeholder(lower)
 }
 
-fn detect_bearer_token(line: &str) -> bool {
+fn detect_bearer_token(line: &str, _lower: &str) -> bool {
     line.contains("Bearer ") && {
         let after = line.split("Bearer ").nth(1).unwrap_or("");
-        after.len() >= 20 && !is_likely_placeholder(&after.to_lowercase())
+        // Only lowercase the trailing slice, not the whole line, to check
+        // for placeholder markers like "YOUR_TOKEN".
+        after.len() >= 20 && !is_likely_placeholder(&after.to_ascii_lowercase())
     }
 }
 
-fn detect_basic_auth(line: &str) -> bool {
+fn detect_basic_auth(line: &str, _lower: &str) -> bool {
     // URLs with embedded credentials: ://user:pass@
     line.contains("://") && line.contains('@') && {
-        // Check for user:pass pattern between :// and @
         if let Some(proto_end) = line.find("://") {
             let after_proto = &line[proto_end + 3..];
             after_proto.contains(':')
@@ -121,8 +132,7 @@ fn detect_basic_auth(line: &str) -> bool {
     }
 }
 
-fn detect_connection_string(line: &str) -> bool {
-    let lower = line.to_lowercase();
+fn detect_connection_string(_line: &str, lower: &str) -> bool {
     (lower.contains("postgres://")
         || lower.contains("mysql://")
         || lower.contains("mongodb://")
@@ -282,5 +292,24 @@ mod tests {
         let content = "fn main() {\n    println!(\"Hello, world!\");\n}";
         let findings = scan_for_secrets(content);
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn detects_case_insensitive_api_key_assignment() {
+        // Regression test for the shared-lowercase refactor: the uppercase
+        // variant must still be flagged.
+        let content = "API_KEY = \"abc123def456ghi789jkl012\"";
+        let findings = scan_for_secrets(content);
+        assert!(
+            findings.iter().any(|f| f.contains("API key")),
+            "should detect uppercase API_KEY: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn detects_mixed_case_password() {
+        let content = "Password: hunter2realsecret";
+        let findings = scan_for_secrets(content);
+        assert!(findings.iter().any(|f| f.contains("Password")));
     }
 }

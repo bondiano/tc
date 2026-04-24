@@ -83,11 +83,11 @@ pub enum CoreError {
     InvalidConfig { field: String, message: String },
 
     // -- Validation aggregation --
-    #[error("DAG validation failed with {count} error(s)")]
-    #[diagnostic(
-        code(tc::core::validation),
-        help("run `tc validate` for details on each error")
+    #[error(
+        "validation failed with {count} error(s):\n{}",
+        errors.iter().map(|e| format!("  - {e}")).collect::<Vec<_>>().join("\n")
     )]
+    #[diagnostic(code(tc::core::validation))]
     ValidationErrors {
         count: usize,
         errors: Vec<CoreError>,
@@ -202,7 +202,10 @@ mod tests {
             CoreError::orphan_dep("T-002", "T-999"),
         ];
         let e = CoreError::validation(errors);
-        assert_eq!(e.to_string(), "DAG validation failed with 2 error(s)");
+        let msg = e.to_string();
+        assert!(msg.starts_with("validation failed with 2 error(s):"));
+        assert!(msg.contains("T-001"));
+        assert!(msg.contains("T-999"));
     }
 
     #[test]

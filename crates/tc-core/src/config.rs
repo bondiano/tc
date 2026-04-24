@@ -277,6 +277,11 @@ impl TcConfig {
             ));
         }
 
+        // -- Plan template --
+        if let Err(e) = ContextRenderer::new(&self.plan_template) {
+            errors.push(CoreError::invalid_config("plan_template", format!("{e}")));
+        }
+
         if errors.is_empty() {
             Ok(())
         } else {
@@ -578,21 +583,25 @@ mod tests {
                     id: StatusId("todo".into()),
                     label: "Todo".into(),
                     terminal: false,
+                    active: false,
                 },
                 StatusDef {
                     id: StatusId("review".into()),
                     label: "Review".into(),
                     terminal: false,
+                    active: false,
                 },
                 StatusDef {
                     id: StatusId("done".into()),
                     label: "Done".into(),
                     terminal: true,
+                    active: false,
                 },
                 StatusDef {
                     id: StatusId("blocked".into()),
                     label: "Blocked".into(),
                     terminal: false,
+                    active: false,
                 },
             ],
             executor: ExecutorConfig {
@@ -657,6 +666,7 @@ mod tests {
             id: StatusId("todo".into()),
             label: "Duplicate".into(),
             terminal: false,
+            active: false,
         });
         let err = cfg.validate().unwrap_err();
         let msg = format!("{err}");
@@ -737,6 +747,15 @@ mod tests {
     fn invalid_context_template_fails() {
         let mut cfg = valid_config();
         cfg.context_template = "{{ unclosed".into();
+        let err = cfg.validate().unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("error"), "{msg}");
+    }
+
+    #[test]
+    fn invalid_plan_template_fails() {
+        let mut cfg = valid_config();
+        cfg.plan_template = "{{ unclosed".into();
         let err = cfg.validate().unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("error"), "{msg}");

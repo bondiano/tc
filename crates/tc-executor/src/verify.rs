@@ -29,16 +29,16 @@ pub async fn run_verification(
     let mut results = Vec::new();
 
     'verify: for cmd_str in commands {
-        let parts: Vec<&str> = cmd_str.split_whitespace().collect();
-        if parts.is_empty() {
+        if cmd_str.trim().is_empty() {
             continue 'verify;
         }
 
-        let program = parts[0];
-        let args = &parts[1..];
-
-        let output = tokio::process::Command::new(program)
-            .args(args)
+        // Run through a real shell so quoted args, `&&`, pipes, redirects,
+        // and globs work like users expect. Split-whitespace parsing here
+        // previously broke anything beyond a single bare command.
+        let output = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd_str)
             .current_dir(working_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -169,6 +169,51 @@ mod tests {
             .unwrap();
         assert!(result.passed);
         assert!(result.results[0].stdout.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn verify_shell_operators() {
+        // `true && false` should fail -- requires shell-level composition.
+        let dir = TempDir::new().unwrap();
+        let result = run_verification(&["true && false".to_string()], dir.path())
+            .await
+            .unwrap();
+        assert!(!result.passed);
+    }
+
+    #[tokio::test]
+    async fn verify_quoted_args_with_spaces() {
+        // Without sh -c, `echo "hello world"` would pass `"hello`, `world"` as
+        // separate tokens and break any tool that cares about quoting.
+        let dir = TempDir::new().unwrap();
+        let result = run_verification(&[r#"echo "hello world""#.to_string()], dir.path())
+            .await
+            .unwrap();
+        assert!(result.passed);
+        assert!(result.results[0].stdout.contains("hello world"));
+    }
+
+    #[tokio::test]
+    async fn verify_shell_pipe() {
+        let dir = TempDir::new().unwrap();
+        let result = run_verification(&["echo hi | grep hi".to_string()], dir.path())
+            .await
+            .unwrap();
+        assert!(result.passed);
+    }
+
+    #[tokio::test]
+    async fn verify_skips_blank_commands() {
+        let dir = TempDir::new().unwrap();
+        let result = run_verification(
+            &["   ".to_string(), "true".to_string(), "".to_string()],
+            dir.path(),
+        )
+        .await
+        .unwrap();
+        assert!(result.passed);
+        // Only the non-empty command should actually run.
+        assert_eq!(result.results.len(), 1);
     }
 
     #[test]

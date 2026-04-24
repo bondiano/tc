@@ -20,6 +20,14 @@ pub enum Assignee {
     Human,
 }
 
+/// Task priority -- surfaced in UIs and used as a sort key.
+///
+/// Derived [`Ord`] follows enum declaration order, so the natural order is
+/// `Critical < High < Normal < Low`. This means an **ascending** sort
+/// (e.g. `tasks.sort_by_key(|t| t.priority)`) puts the most important
+/// tasks *first* -- handy for UI lists, but surprising if you expect
+/// "higher priority = larger value". Compare explicitly when that
+/// intuition matters.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Priority {

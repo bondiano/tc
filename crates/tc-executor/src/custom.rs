@@ -4,7 +4,7 @@ use tc_core::config::CustomBackendConfig;
 use tempfile::NamedTempFile;
 
 use crate::error::ExecutorError;
-use crate::io::pipe_child_to_log;
+use crate::io::spawn_and_wait;
 use crate::sandbox::{detect_provider, wrap_with_sandbox};
 use crate::traits::{ExecutionMode, ExecutionRequest, ExecutionResult, Executor};
 
@@ -78,9 +78,9 @@ impl CustomExecutor {
         &self,
         base_args: Vec<String>,
         request: &ExecutionRequest,
-    ) -> (String, Vec<String>) {
+    ) -> Result<(String, Vec<String>), ExecutorError> {
         if !matches!(request.mode, ExecutionMode::Yolo) {
-            return (self.config.command.clone(), base_args);
+            return Ok((self.config.command.clone(), base_args));
         }
         let provider = detect_provider(&request.sandbox);
         wrap_with_sandbox(
@@ -103,7 +103,7 @@ impl Executor for CustomExecutor {
         }
 
         let base_args = self.expand_args(request, None);
-        let (program, args) = self.wrap_if_yolo(base_args, request);
+        let (program, args) = self.wrap_if_yolo(base_args, request)?;
 
         let mut cmd = tokio::process::Command::new(&program);
         cmd.args(&args);
@@ -140,40 +140,18 @@ impl Executor for CustomExecutor {
 
         let ctx_path = ctx_file.as_ref().map(|f| f.path());
         let base_args = self.expand_args(request, ctx_path);
-        let (program, args) = self.wrap_if_yolo(base_args, request);
+        let (program, args) = self.wrap_if_yolo(base_args, request)?;
 
         let mut cmd = tokio::process::Command::new(&program);
         cmd.args(&args);
         cmd.current_dir(&request.working_dir);
 
-        if log_sink.is_some() {
-            cmd.stdout(std::process::Stdio::piped());
-            cmd.stderr(std::process::Stdio::piped());
-        }
+        let result = spawn_and_wait(cmd, log_sink, &self.config.command).await;
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| ExecutorError::spawn_failed(&self.config.command, e))?;
-
-        let log_path = if let Some(sink) = log_sink {
-            pipe_child_to_log(&mut child, sink)?;
-            Some(sink.to_path_buf())
-        } else {
-            None
-        };
-
-        let status = child
-            .wait()
-            .await
-            .map_err(|e| ExecutorError::spawn_failed(&self.config.command, e))?;
-
-        // Keep ctx_file alive until wait() returns.
+        // Keep ctx_file alive until spawn_and_wait returns.
         drop(ctx_file);
 
-        Ok(ExecutionResult {
-            exit_code: status.code().unwrap_or(-1),
-            log_path,
-        })
+        result
     }
 }
 

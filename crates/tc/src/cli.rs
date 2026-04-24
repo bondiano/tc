@@ -205,6 +205,9 @@ pub struct ListArgs {
     /// Filter by epic
     #[arg(long)]
     pub epic: Option<String>,
+    /// Print task IDs one per line (for shell completion)
+    #[arg(long)]
+    pub ids_only: bool,
 }
 
 #[derive(clap::Args)]

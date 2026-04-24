@@ -12,7 +12,7 @@ use tc_executor::sandbox::sandbox_from_core;
 use tc_executor::traits::{ExecutionRequest, Executor, SandboxConfig};
 use tc_packer::{PackOptions, PackStyle};
 
-pub fn run(args: ImplArgs) -> Result<(), CliError> {
+pub async fn run(args: ImplArgs) -> Result<(), CliError> {
     let store = tc_storage::Store::discover()?;
     let mut tasks = store.load_tasks()?;
     let config = store.load_config()?;
@@ -129,10 +129,7 @@ pub fn run(args: ImplArgs) -> Result<(), CliError> {
         write_context_file(&context_path, &context)?;
     }
 
-    let rt = tokio::runtime::Runtime::new()
-        .map_err(|e| CliError::User(format!("failed to create runtime: {e}")))?;
-
-    let result = rt.block_on(run_executor(&args, &config, &request))?;
+    let result = run_executor(&args, &config, &request).await?;
 
     let _ = std::fs::remove_file(&context_path);
 
@@ -143,7 +140,7 @@ pub fn run(args: ImplArgs) -> Result<(), CliError> {
         .ok_or_else(|| tc_core::error::CoreError::TaskNotFound(args.id.clone()))?;
 
     if !args.no_verify && !config.verification.commands.is_empty() && result.exit_code == 0 {
-        let verify_result = rt.block_on(run_verification(&config, store.root()))?;
+        let verify_result = run_verification(&config, store.root()).await?;
 
         if verify_result {
             tasks[task_idx].status = StatusId(config.verification.on_pass.clone());
@@ -161,8 +158,13 @@ pub fn run(args: ImplArgs) -> Result<(), CliError> {
             ));
         }
     } else if result.exit_code == 0 {
-        // No verification -- prompt user
-        prompt_completion(&store, &mut tasks, task_idx, &args.id)?;
+        // No verification -- prompt user. Read stdin inside spawn_blocking
+        // so the Tokio runtime isn't stalled by the sync `Stdin::lock`.
+        let task_id_owned = args.id.clone();
+        let choice = tokio::task::spawn_blocking(move || read_completion_choice(&task_id_owned))
+            .await
+            .map_err(|e| CliError::user(format!("stdin task join failed: {e}")))??;
+        apply_completion_choice(&store, &mut tasks, task_idx, &args.id, choice)?;
     } else {
         tasks[task_idx].status = StatusId::blocked();
         append_note(
@@ -235,12 +237,13 @@ async fn run_verification(
     Ok(result.passed)
 }
 
-fn prompt_completion(
-    store: &tc_storage::Store,
-    tasks: &mut [Task],
-    task_idx: usize,
-    task_id: &str,
-) -> Result<(), CliError> {
+enum CompletionChoice {
+    Done,
+    Review,
+    LeaveInProgress,
+}
+
+fn read_completion_choice(task_id: &str) -> Result<CompletionChoice, CliError> {
     eprint!("Mark {task_id} as done? [y/n/review] ");
     io::stderr().flush().ok();
 
@@ -252,10 +255,24 @@ fn prompt_completion(
         .unwrap_or(Ok(String::new()))
         .unwrap_or_default();
 
-    let new_status = match line.trim().to_lowercase().as_str() {
-        "y" | "yes" => "done",
-        "r" | "review" => "review",
-        _ => {
+    Ok(match line.trim().to_lowercase().as_str() {
+        "y" | "yes" => CompletionChoice::Done,
+        "r" | "review" => CompletionChoice::Review,
+        _ => CompletionChoice::LeaveInProgress,
+    })
+}
+
+fn apply_completion_choice(
+    store: &tc_storage::Store,
+    tasks: &mut [Task],
+    task_idx: usize,
+    task_id: &str,
+    choice: CompletionChoice,
+) -> Result<(), CliError> {
+    let new_status = match choice {
+        CompletionChoice::Done => "done",
+        CompletionChoice::Review => "review",
+        CompletionChoice::LeaveInProgress => {
             output::print_warning(&format!("{task_id} left as in_progress"));
             return Ok(());
         }

@@ -23,21 +23,25 @@ pub fn dummy_config() -> TcConfig {
                 id: StatusId("todo".into()),
                 label: "Todo".into(),
                 terminal: false,
+                active: false,
             },
             StatusDef {
                 id: StatusId("in_progress".into()),
                 label: "In Progress".into(),
                 terminal: false,
+                active: false,
             },
             StatusDef {
                 id: StatusId("done".into()),
                 label: "Done".into(),
                 terminal: true,
+                active: false,
             },
             StatusDef {
                 id: StatusId("blocked".into()),
                 label: "Blocked".into(),
                 terminal: false,
+                active: false,
             },
         ],
         executor: ExecutorConfig {

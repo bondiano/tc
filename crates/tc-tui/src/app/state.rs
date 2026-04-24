@@ -144,19 +144,7 @@ impl App {
         };
         self.log_view.sync_task(Some(&t.id));
         let path = self.store.log_path(&t.id);
-        let lines = match std::fs::read_to_string(&path) {
-            Ok(content) => {
-                let mut tail: Vec<String> = content
-                    .lines()
-                    .rev()
-                    .take(MAX_LOG_LINES)
-                    .map(String::from)
-                    .collect();
-                tail.reverse();
-                tail
-            }
-            Err(_) => vec![format!("(no log at {})", path.display())],
-        };
+        let lines = tc_executor::log_tail::read_tail_lines(&path, MAX_LOG_LINES);
         self.log_view.set_lines(lines);
     }
 

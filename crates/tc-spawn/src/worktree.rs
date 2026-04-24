@@ -217,36 +217,39 @@ fn build_worktree_info(
     })
 }
 
-/// Recursively copy .tc/ directory into the worktree.
+/// Files the worker needs to see inside the worktree's `.tc/` directory.
+///
+/// Everything else (logs/, workers/, verdicts, drafts, locks) is process-
+/// private state that must NOT leak into the worker's copy: stale worker
+/// JSON would confuse tc, and copying a large log history is wasteful.
+const TC_WORKTREE_WHITELIST: &[&str] = &["tasks.yaml", "config.yaml"];
+
+/// Copy the whitelisted `.tc/` files into the worktree.
+///
+/// Missing files are silently skipped (a project may have no config yet).
+/// Anything outside the whitelist is intentionally left out.
 fn copy_tc_dir(root: &Path, worktree_path: &Path) -> Result<(), SpawnError> {
     let src = root.join(".tc");
-    let dst = worktree_path.join(".tc");
-
     if !src.exists() {
         return Ok(());
     }
 
-    copy_dir_recursive(&src, &dst).map_err(|e| {
-        SpawnError::worktree_create(worktree_path, format!("failed to copy .tc/: {e}"))
-    })
-}
+    let dst = worktree_path.join(".tc");
+    std::fs::create_dir_all(&dst).map_err(|e| {
+        SpawnError::worktree_create(worktree_path, format!("failed to create .tc/ dir: {e}"))
+    })?;
 
-/// Recursively copy a directory.
-fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    'entries: for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-
-        if file_type.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            std::fs::copy(&src_path, &dst_path)?;
+    'files: for name in TC_WORKTREE_WHITELIST {
+        let src_file = src.join(name);
+        if !src_file.exists() {
+            continue 'files;
         }
-        continue 'entries;
+        let dst_file = dst.join(name);
+        std::fs::copy(&src_file, &dst_file).map_err(|e| {
+            SpawnError::worktree_create(worktree_path, format!("failed to copy .tc/{name}: {e}"))
+        })?;
     }
+
     Ok(())
 }
 
@@ -431,20 +434,83 @@ branch refs/heads/tc/T-001
     }
 
     #[test]
-    fn tc_dir_copied_into_worktree() {
+    fn tc_dir_whitelist_copies_tasks_and_config_only() {
         let dir = setup_git_repo();
         let root = dir.path();
 
-        // Add nested dir to .tc/
+        // Pollute .tc/ with things that must NOT end up in the worktree.
         let logs_dir = root.join(".tc/logs");
         std::fs::create_dir_all(&logs_dir).unwrap();
-        std::fs::write(logs_dir.join("test.log"), "log data").unwrap();
+        std::fs::write(logs_dir.join("test.log"), "secret log").unwrap();
+
+        let workers_dir = root.join(".tc/workers");
+        std::fs::create_dir_all(&workers_dir).unwrap();
+        std::fs::write(workers_dir.join("T-001.json"), "{\"pid\":1}").unwrap();
+
+        std::fs::write(root.join(".tc/.tester_verdict.json"), "{}").unwrap();
+        std::fs::write(root.join(".tc/draft_add_task.txt"), "draft").unwrap();
 
         let mgr = WorktreeManager::new(root.to_path_buf(), default_spawn_config());
         let wt_path = mgr.create(&TaskId("T-005".into())).unwrap();
 
-        assert!(wt_path.join(".tc/logs/test.log").exists());
-        let content = std::fs::read_to_string(wt_path.join(".tc/logs/test.log")).unwrap();
-        assert_eq!(content, "log data");
+        // Whitelist: these must exist.
+        assert!(wt_path.join(".tc/tasks.yaml").exists());
+        assert!(wt_path.join(".tc/config.yaml").exists());
+
+        // Everything else must NOT be copied.
+        assert!(!wt_path.join(".tc/logs").exists(), "logs/ leaked");
+        assert!(!wt_path.join(".tc/workers").exists(), "workers/ leaked");
+        assert!(
+            !wt_path.join(".tc/.tester_verdict.json").exists(),
+            "verdict leaked"
+        );
+        assert!(
+            !wt_path.join(".tc/draft_add_task.txt").exists(),
+            "draft leaked"
+        );
+    }
+
+    #[test]
+    fn worktree_tc_dir_missing_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // Same init as setup_git_repo but without creating .tc/.
+        Command::new("git")
+            .args(["init"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "t@t.com"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "T"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["checkout", "-b", "main"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        std::fs::write(root.join("README.md"), "# x\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+
+        let mgr = WorktreeManager::new(root.to_path_buf(), default_spawn_config());
+        let wt_path = mgr.create(&TaskId("T-099".into())).unwrap();
+        // No .tc/ in source => no .tc/ in worktree, no error.
+        assert!(!wt_path.join(".tc").exists());
     }
 }

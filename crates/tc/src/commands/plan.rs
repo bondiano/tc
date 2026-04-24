@@ -10,7 +10,7 @@ use tc_core::status::StatusMachine;
 use tc_core::task::Task;
 use tc_packer::{PackOptions, PackStyle};
 
-pub fn run(args: PlanArgs) -> Result<(), CliError> {
+pub async fn run(args: PlanArgs) -> Result<(), CliError> {
     let store = tc_storage::Store::discover()?;
     let tasks = store.load_tasks()?;
     let config = store.load_config()?;
@@ -75,10 +75,7 @@ pub fn run(args: PlanArgs) -> Result<(), CliError> {
         return Err(tc_executor::error::ExecutorError::not_found(program).into());
     }
 
-    let rt = tokio::runtime::Runtime::new()
-        .map_err(|e| CliError::user(format!("failed to create runtime: {e}")))?;
-
-    let plan_output = rt.block_on(run_plan_agent(program, &prompt, store.root()))?;
+    let plan_output = run_plan_agent(program, &prompt, store.root()).await?;
 
     println!("{plan_output}");
 

@@ -7,16 +7,7 @@ use crate::cli::{GithubImportArgs, ImportArgs, ImportSource, LinearImportArgs};
 use crate::error::CliError;
 use crate::output;
 
-pub fn run(args: ImportArgs) -> Result<(), CliError> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| CliError::user(format!("failed to start async runtime: {e}")))?;
-
-    rt.block_on(run_async(args))
-}
-
-async fn run_async(args: ImportArgs) -> Result<(), CliError> {
+pub async fn run(args: ImportArgs) -> Result<(), CliError> {
     match args.source {
         ImportSource::Github(gh) => import_github(gh).await,
         ImportSource::Linear(lin) => import_linear(lin).await,
@@ -36,6 +27,32 @@ struct GithubIssue {
 #[derive(Debug, Deserialize)]
 struct GithubLabel {
     name: String,
+}
+
+/// Parse the GitHub pagination `Link` header and return the URL for `rel="next"`.
+///
+/// GitHub responses look like:
+/// `Link: <https://api.github.com/...?page=2>; rel="next", <...>; rel="last"`.
+fn parse_github_next_link(header: Option<&reqwest::header::HeaderValue>) -> Option<String> {
+    let raw = header?.to_str().ok()?;
+    'parts: for part in raw.split(',') {
+        let part = part.trim();
+        let Some(end) = part.find('>') else {
+            continue 'parts;
+        };
+        let Some(start) = part.find('<') else {
+            continue 'parts;
+        };
+        if end <= start {
+            continue 'parts;
+        }
+        let url = &part[start + 1..end];
+        let rest = &part[end + 1..];
+        if rest.contains("rel=\"next\"") {
+            return Some(url.to_string());
+        }
+    }
+    None
 }
 
 fn github_token() -> Result<String, CliError> {
@@ -79,31 +96,51 @@ async fn import_github(args: GithubImportArgs) -> Result<(), CliError> {
         url.push_str(&format!("&milestone={milestone}"));
     }
 
-    let resp = client
-        .get(&url)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "tc-task-commander")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .send()
-        .await
-        .map_err(|e| CliError::user(format!("GitHub API request failed: {e}")))?;
+    // Paginate through GitHub's `Link: <...>; rel="next"` header. Without
+    // this, any repo with more than 100 matching issues silently truncated.
+    let mut issues: Vec<GithubIssue> = Vec::new();
+    let mut next_url = Some(url);
+    const MAX_PAGES: usize = 100;
+    let mut page = 0;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp
-            .text()
+    while let Some(page_url) = next_url.take() {
+        page += 1;
+        if page > MAX_PAGES {
+            output::print_warning(&format!(
+                "hit pagination safety limit ({MAX_PAGES} pages); truncating"
+            ));
+            break;
+        }
+
+        let resp = client
+            .get(&page_url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Accept", "application/vnd.github+json")
+            .header("User-Agent", "tc-task-commander")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
             .await
-            .unwrap_or_else(|_| "<no body>".to_string());
-        return Err(CliError::user(format!(
-            "GitHub API returned {status}: {body}"
-        )));
-    }
+            .map_err(|e| CliError::user(format!("GitHub API request failed: {e}")))?;
 
-    let issues: Vec<GithubIssue> = resp
-        .json()
-        .await
-        .map_err(|e| CliError::user(format!("failed to parse GitHub response: {e}")))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "<no body>".to_string());
+            return Err(CliError::user(format!(
+                "GitHub API returned {status}: {body}"
+            )));
+        }
+
+        next_url = parse_github_next_link(resp.headers().get(reqwest::header::LINK));
+
+        let page_issues: Vec<GithubIssue> = resp
+            .json()
+            .await
+            .map_err(|e| CliError::user(format!("failed to parse GitHub response: {e}")))?;
+        issues.extend(page_issues);
+    }
 
     // Filter out pull requests (GitHub API returns PRs as issues too)
     let issues: Vec<&GithubIssue> = issues

@@ -65,6 +65,30 @@ pub enum ExecutorError {
         help("increase the timeout in .tc/config.yaml or break the task into smaller pieces")
     )]
     Timeout { seconds: u64 },
+
+    #[error("failed to read tester verdict at '{path}': {source}")]
+    #[diagnostic(
+        code(tc::executor::verdict_read),
+        help(
+            "check file permissions; if the tester did not write a verdict, no status change is applied"
+        )
+    )]
+    VerdictRead {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
+
+    #[error("failed to parse tester verdict at '{path}': {source}")]
+    #[diagnostic(
+        code(tc::executor::verdict_parse),
+        help(
+            "verdict must be JSON like {{\"verdict\":\"pass\"}} or {{\"verdict\":\"fail\",\"reason\":\"...\"}}"
+        )
+    )]
+    VerdictParse {
+        path: std::path::PathBuf,
+        source: serde_json::Error,
+    },
 }
 
 impl ExecutorError {
@@ -103,6 +127,20 @@ impl ExecutorError {
         Self::TaskNotReady {
             task: task.into(),
             reason: reason.into(),
+        }
+    }
+
+    pub fn verdict_read(path: impl Into<std::path::PathBuf>, source: std::io::Error) -> Self {
+        Self::VerdictRead {
+            path: path.into(),
+            source,
+        }
+    }
+
+    pub fn verdict_parse(path: impl Into<std::path::PathBuf>, source: serde_json::Error) -> Self {
+        Self::VerdictParse {
+            path: path.into(),
+            source,
         }
     }
 }

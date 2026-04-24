@@ -1,3 +1,8 @@
+#[cfg(not(unix))]
+compile_error!(
+    "tc currently supports Unix only (macOS, Linux). Windows is not supported; PRs welcome."
+);
+
 mod cli;
 mod commands;
 mod error;
@@ -21,14 +26,25 @@ fn main() -> miette::Result<()> {
 
     let cli = Cli::parse();
 
-    match cli.command {
-        Some(cmd) => run_command(cmd),
-        None => commands::tui::run().map_err(Into::into),
-    }
-    .map_err(Into::into)
+    // Single Tokio runtime for the whole process. Every subcommand used to
+    // spin up its own Runtime -- wasteful and meant a shared HTTP client or
+    // task coordinator couldn't live for longer than one command.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| miette::miette!("failed to build tokio runtime: {e}"))?;
+
+    let result = rt.block_on(async move {
+        match cli.command {
+            Some(cmd) => dispatch(cmd).await,
+            None => commands::tui::run().map_err(Into::into),
+        }
+    });
+
+    result.map_err(Into::into)
 }
 
-fn run_command(cmd: Commands) -> Result<(), CliError> {
+async fn dispatch(cmd: Commands) -> Result<(), CliError> {
     match cmd {
         Commands::Init => commands::init::run(),
         Commands::Add(args) => commands::add::run(args),
@@ -44,18 +60,18 @@ fn run_command(cmd: Commands) -> Result<(), CliError> {
         Commands::Stats => commands::stats::run(),
         Commands::Graph(args) => commands::graph::run(args),
         Commands::Pack(args) => commands::pack::run(args),
-        Commands::Plan(args) => commands::plan::run(args),
-        Commands::Impl(args) => commands::impl_::run(args),
-        Commands::Spawn(args) => commands::spawn::run(args),
+        Commands::Plan(args) => commands::plan::run(args).await,
+        Commands::Impl(args) => commands::impl_::run(args).await,
+        Commands::Spawn(args) => commands::spawn::run(args).await,
         Commands::Workers(args) => commands::spawn::run_workers(args),
         Commands::Logs(args) => commands::spawn::run_logs(args),
         Commands::Kill(args) => commands::spawn::run_kill(args),
         Commands::Attach(args) => commands::spawn::run_attach(args),
         Commands::Review(args) => commands::review::run(args),
         Commands::Merge(args) => commands::review::run_merge(args),
-        Commands::Test(args) => commands::test::run(args),
+        Commands::Test(args) => commands::test::run(args).await,
         Commands::Epic(args) => commands::epic::run(args),
-        Commands::Import(args) => commands::import::run(args),
+        Commands::Import(args) => commands::import::run(args).await,
         Commands::Config(args) => commands::config::run(args),
         Commands::Changelog(args) => commands::changelog::run(args),
         Commands::Tui => commands::tui::run().map_err(Into::into),

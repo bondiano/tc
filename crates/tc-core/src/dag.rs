@@ -64,7 +64,7 @@ impl TaskDag {
         tasks
             .iter()
             .filter(|t| !sm.is_terminal(&t.status))
-            .filter(|t| t.status.0 != "in_progress")
+            .filter(|t| !sm.is_active(&t.status))
             .filter(|t| {
                 t.depends_on
                     .iter()
@@ -147,21 +147,25 @@ mod tests {
                 id: StatusId("todo".into()),
                 label: "Todo".into(),
                 terminal: false,
+                active: false,
             },
             StatusDef {
                 id: StatusId("in_progress".into()),
                 label: "In Progress".into(),
                 terminal: false,
+                active: false,
             },
             StatusDef {
                 id: StatusId("done".into()),
                 label: "Done".into(),
                 terminal: true,
+                active: false,
             },
             StatusDef {
                 id: StatusId("blocked".into()),
                 label: "Blocked".into(),
                 terminal: false,
+                active: false,
             },
         ])
     }

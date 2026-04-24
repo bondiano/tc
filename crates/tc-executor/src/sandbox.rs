@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use crate::error::ExecutorError;
 use crate::traits::{SandboxConfig, SandboxPolicy};
 
 /// Build an executor `SandboxConfig` from the core/user-facing config.
@@ -65,26 +66,56 @@ pub fn detect_provider(config: &SandboxConfig) -> SandboxProvider {
 /// Wrap a command with the appropriate sandbox provider.
 ///
 /// Returns the command program and args, prefixed with sandbox invocation.
+/// May return [`ExecutorError::Sandbox`] when the selected provider cannot
+/// satisfy a config option (e.g. sbx has no per-invocation network switch).
 pub fn wrap_with_sandbox(
     program: &str,
     args: &[String],
     provider: &SandboxProvider,
     config: &SandboxConfig,
     working_dir: &Path,
-) -> (String, Vec<String>) {
+) -> Result<(String, Vec<String>), ExecutorError> {
     match provider {
         SandboxProvider::Sbx => wrap_sbx(program, args, config),
-        SandboxProvider::Nono => wrap_nono(program, args, config, working_dir),
-        SandboxProvider::SandboxExec => wrap_sandbox_exec(program, args, config, working_dir),
-        SandboxProvider::Bwrap => wrap_bwrap(program, args, config, working_dir),
-        SandboxProvider::None => (program.to_string(), args.to_vec()),
+        SandboxProvider::Nono => Ok(wrap_nono(program, args, config, working_dir)),
+        SandboxProvider::SandboxExec => Ok(wrap_sandbox_exec(program, args, config, working_dir)),
+        SandboxProvider::Bwrap => Ok(wrap_bwrap(program, args, config, working_dir)),
+        SandboxProvider::None => Ok((program.to_string(), args.to_vec())),
     }
 }
 
-fn wrap_sbx(program: &str, args: &[String], _config: &SandboxConfig) -> (String, Vec<String>) {
-    let mut sbx_args = vec!["run".to_string(), program.to_string(), "--".to_string()];
+/// Build an `sbx run ... -- <args>` invocation.
+///
+/// `sbx run` takes extra workspace mounts as positional arguments with an
+/// optional `:ro` suffix -- we wire `config.extra_allow` through as read-write
+/// mounts so the agent can reach user-specified paths outside the primary
+/// workdir (already mounted by sbx).
+///
+/// `block_network` has no per-invocation switch: sbx network policy is
+/// global (`sbx policy deny network "*"`). When a caller requests it, we
+/// refuse loudly rather than silently ignoring the flag -- users can set
+/// the global policy themselves, or switch to `nono`/`bwrap` where
+/// per-invocation isolation is available.
+fn wrap_sbx(
+    program: &str,
+    args: &[String],
+    config: &SandboxConfig,
+) -> Result<(String, Vec<String>), ExecutorError> {
+    if config.block_network {
+        return Err(ExecutorError::sandbox(
+            "sbx has no per-invocation network switch; \
+             set a global policy with `sbx policy deny network \"*\"` \
+             or switch the sandbox provider to `nono` or `bwrap`",
+        ));
+    }
+
+    let mut sbx_args = vec!["run".to_string(), program.to_string()];
+    for extra in &config.extra_allow {
+        sbx_args.push(extra.display().to_string());
+    }
+    sbx_args.push("--".to_string());
     sbx_args.extend_from_slice(args);
-    ("sbx".to_string(), sbx_args)
+    Ok(("sbx".to_string(), sbx_args))
 }
 
 fn wrap_nono(
@@ -235,7 +266,8 @@ mod tests {
             &SandboxProvider::None,
             &default_config(),
             Path::new("/work"),
-        );
+        )
+        .unwrap();
         assert_eq!(prog, "claude");
         assert_eq!(args, vec!["--print", "hello"]);
     }
@@ -248,9 +280,56 @@ mod tests {
             &SandboxProvider::Sbx,
             &default_config(),
             Path::new("/work"),
-        );
+        )
+        .unwrap();
         assert_eq!(prog, "sbx");
         assert_eq!(args, vec!["run", "claude", "--", "--print", "context"]);
+    }
+
+    #[test]
+    fn wrap_sbx_with_extra_allow() {
+        let config = SandboxConfig {
+            enabled: SandboxPolicy::Auto,
+            extra_allow: vec![PathBuf::from("/extra/one"), PathBuf::from("/extra/two")],
+            block_network: false,
+        };
+        let (prog, args) = wrap_with_sandbox(
+            "claude",
+            &["--print".to_string()],
+            &SandboxProvider::Sbx,
+            &config,
+            Path::new("/work"),
+        )
+        .unwrap();
+        assert_eq!(prog, "sbx");
+        // positional extra mounts appear between the agent name and `--`.
+        assert_eq!(
+            args,
+            vec!["run", "claude", "/extra/one", "/extra/two", "--", "--print"]
+        );
+    }
+
+    #[test]
+    fn wrap_sbx_block_network_errors() {
+        let config = SandboxConfig {
+            enabled: SandboxPolicy::Auto,
+            extra_allow: vec![],
+            block_network: true,
+        };
+        let err = wrap_with_sandbox(
+            "claude",
+            &[],
+            &SandboxProvider::Sbx,
+            &config,
+            Path::new("/work"),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("sbx"),
+            "expected sbx-specific error, got: {msg}"
+        );
+        assert!(msg.contains("network"));
     }
 
     #[test]
@@ -261,7 +340,8 @@ mod tests {
             &SandboxProvider::Nono,
             &default_config(),
             Path::new("/work/project"),
-        );
+        )
+        .unwrap();
         assert_eq!(prog, "nono");
         assert_eq!(
             args,
@@ -290,7 +370,8 @@ mod tests {
             &SandboxProvider::Nono,
             &config,
             Path::new("/work"),
-        );
+        )
+        .unwrap();
         assert_eq!(prog, "nono");
         assert!(args.contains(&"--allow".to_string()));
         assert!(args.contains(&"/tmp".to_string()));
@@ -305,7 +386,8 @@ mod tests {
             &SandboxProvider::SandboxExec,
             &default_config(),
             Path::new("/work/project"),
-        );
+        )
+        .unwrap();
         assert_eq!(prog, "sandbox-exec");
         assert_eq!(args[0], "-p");
         assert!(args[1].contains("(version 1)"));
@@ -342,7 +424,8 @@ mod tests {
             &SandboxProvider::Bwrap,
             &default_config(),
             Path::new("/work/project"),
-        );
+        )
+        .unwrap();
         assert_eq!(prog, "bwrap");
         let joined = args.join(" ");
         assert!(joined.contains("--ro-bind / /"));
@@ -364,7 +447,8 @@ mod tests {
             &SandboxProvider::Bwrap,
             &config,
             Path::new("/work"),
-        );
+        )
+        .unwrap();
         assert!(args.contains(&"--unshare-net".to_string()));
     }
 
