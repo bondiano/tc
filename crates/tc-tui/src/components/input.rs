@@ -15,7 +15,7 @@ const MAX_ROWS: u16 = 10;
 pub fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let title = match app.input_mode {
         InputMode::AddTask => " Add Task (Enter submit / Shift+Enter newline / Esc cancel) ",
-        InputMode::Filter => " Filter (Enter/Esc to exit) ",
+        InputMode::Filter => " Fuzzy find (live; Enter keep / Esc clear) ",
         InputMode::Reject => " Reject (Enter submit / Shift+Enter newline / Esc cancel) ",
         InputMode::LogSearch => " Log search (Enter confirm / Esc clear) ",
         InputMode::Normal => " Status ",

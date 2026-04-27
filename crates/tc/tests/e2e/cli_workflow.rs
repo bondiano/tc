@@ -238,3 +238,439 @@ fn list_ids_only_for_completion() {
     let out = tc_run(root, &["list", "--ids-only", "--epic", "a"]);
     assert_eq!(out.trim(), "T-001\nT-003");
 }
+
+#[test]
+fn list_with_filter_dsl() {
+    let dir = setup_project();
+    let root = dir.path();
+
+    tc_run(
+        root,
+        &[
+            "add",
+            "Urgent backend",
+            "--epic",
+            "be",
+            "--priority",
+            "p1",
+            "--tag",
+            "backend",
+        ],
+    );
+    tc_run(
+        root,
+        &[
+            "add",
+            "Mid frontend",
+            "--epic",
+            "fe",
+            "--priority",
+            "p3",
+            "--tag",
+            "frontend",
+        ],
+    );
+    tc_run(
+        root,
+        &[
+            "add",
+            "Low backend",
+            "--epic",
+            "be",
+            "--priority",
+            "p4",
+            "--tag",
+            "backend",
+        ],
+    );
+
+    // priority filter
+    let out = tc_run(root, &["list", "priority:p1"]);
+    assert!(out.contains("Urgent backend"));
+    assert!(!out.contains("Mid frontend"));
+    assert!(!out.contains("Low backend"));
+
+    // tag + priority AND
+    let out = tc_run(root, &["list", "tag:backend", "priority:p4"]);
+    assert!(out.contains("Low backend"));
+    assert!(!out.contains("Urgent backend"));
+
+    // negated term
+    let out = tc_run(root, &["list", "!tag:frontend"]);
+    assert!(out.contains("Urgent backend"));
+    assert!(out.contains("Low backend"));
+    assert!(!out.contains("Mid frontend"));
+}
+
+#[test]
+fn smart_views_today_and_inbox() {
+    let dir = setup_project();
+    let root = dir.path();
+
+    let today = chrono::Local::now().date_naive().to_string();
+
+    tc_run(
+        root,
+        &[
+            "add",
+            "Due today task",
+            "--epic",
+            "today_epic",
+            "--due",
+            &today,
+        ],
+    );
+    tc_run(root, &["add", "Inbox task", "--epic", "default"]);
+
+    let out = tc_run(root, &["today"]);
+    assert!(out.contains("Due today task"), "today view: {out}");
+    assert!(
+        !out.contains("Inbox task"),
+        "today should skip undated: {out}"
+    );
+
+    let out = tc_run(root, &["inbox"]);
+    assert!(out.contains("Inbox task"), "inbox view: {out}");
+    assert!(!out.contains("Due today task"));
+}
+
+#[test]
+fn fuzzy_find_command() {
+    let dir = setup_project();
+    let root = dir.path();
+
+    tc_run(root, &["add", "Implement OAuth login", "--epic", "auth"]);
+    tc_run(root, &["add", "Refactor database layer", "--epic", "db"]);
+    tc_run(root, &["add", "Fix typo in README", "--epic", "docs"]);
+
+    let out = tc_run(root, &["find", "oauth"]);
+    assert!(out.contains("Implement OAuth login"), "fuzzy find: {out}");
+    assert!(!out.contains("Fix typo"));
+
+    // ids-only mode for scripting
+    let out = tc_run(root, &["find", "database", "--ids-only"]);
+    assert!(out.contains("T-002"));
+    assert!(!out.contains("T-001"));
+}
+
+#[test]
+fn import_json_file() {
+    use std::fs;
+    let dir = setup_project();
+    let root = dir.path();
+
+    let json = r#"[
+        {
+            "title": "Imported one",
+            "priority": "p1",
+            "tags": ["alpha"],
+            "due": "2026-12-31",
+            "source_ref": "ext-1"
+        },
+        {
+            "title": "Imported two",
+            "tags": ["beta"]
+        }
+    ]"#;
+    let path = root.join("import.json");
+    fs::write(&path, json).expect("write json");
+
+    tc_run(
+        root,
+        &[
+            "import",
+            "--format",
+            "json",
+            "--file",
+            path.to_str().unwrap(),
+            "--epic",
+            "imported",
+        ],
+    );
+
+    let out = tc_run(root, &["list", "--epic", "imported"]);
+    assert!(out.contains("Imported one"));
+    assert!(out.contains("Imported two"));
+
+    // dedup: re-import should skip
+    let stderr = String::from_utf8(
+        crate::helpers::tc_in(root)
+            .args([
+                "import",
+                "--format",
+                "json",
+                "--file",
+                path.to_str().unwrap(),
+                "--epic",
+                "imported",
+            ])
+            .output()
+            .expect("re-import")
+            .stderr,
+    )
+    .unwrap();
+    assert!(
+        stderr.contains("Skipped") || stderr.contains("No new"),
+        "expected dedup notice, got: {stderr}"
+    );
+}
+
+#[test]
+fn import_kairo_md_file() {
+    use std::fs;
+    let dir = setup_project();
+    let root = dir.path();
+
+    let md = "\
+# My plan
+
+- [ ] First task #backend !p1 due:2026-05-01
+  - [ ] Sub item one
+  - [ ] Sub item two
+- [ ] Second task #frontend
+- this is a noise line
+";
+    let path = root.join("plan.md");
+    fs::write(&path, md).expect("write md");
+
+    tc_run(
+        root,
+        &[
+            "import",
+            "--format",
+            "kairo-md",
+            "--file",
+            path.to_str().unwrap(),
+            "--epic",
+            "from_md",
+        ],
+    );
+
+    let out = tc_run(root, &["list", "--epic", "from_md"]);
+    assert!(out.contains("First task"));
+    assert!(out.contains("Second task"));
+
+    // First task should have AC
+    let out = tc_run(root, &["show", "T-001"]);
+    assert!(out.contains("Sub item one"), "AC not parsed: {out}");
+    assert!(out.contains("Sub item two"));
+    assert!(out.contains("p1"));
+}
+
+#[test]
+fn export_json_round_trips_through_import() {
+    use std::fs;
+    let dir = setup_project();
+    let root = dir.path();
+
+    tc_run(
+        root,
+        &[
+            "add",
+            "Alpha",
+            "--epic",
+            "src",
+            "--priority",
+            "p1",
+            "--tag",
+            "backend",
+            "--due",
+            "2026-12-31",
+        ],
+    );
+    tc_run(
+        root,
+        &[
+            "add",
+            "Beta",
+            "--epic",
+            "src",
+            "--priority",
+            "p4",
+            "--tag",
+            "frontend",
+            "--ac",
+            "Tests pass",
+        ],
+    );
+
+    let json_path = root.join("export.json");
+    tc_run(
+        root,
+        &[
+            "export",
+            "--format",
+            "json",
+            "--output",
+            json_path.to_str().unwrap(),
+        ],
+    );
+    let exported = fs::read_to_string(&json_path).expect("read export");
+    assert!(exported.contains("\"source_ref\": \"T-001\""));
+    assert!(exported.contains("\"priority\": \"p1\""));
+    assert!(exported.contains("\"backend\""));
+
+    // Import into a fresh project; expect both tasks back, with their
+    // priority/tag/due/AC intact.
+    let dest = setup_project();
+    let dest_root = dest.path();
+    tc_run(
+        dest_root,
+        &[
+            "import",
+            "--format",
+            "json",
+            "--file",
+            json_path.to_str().unwrap(),
+            "--epic",
+            "irrelevant_default",
+        ],
+    );
+
+    let out = tc_run(dest_root, &["list"]);
+    assert!(out.contains("Alpha"), "Alpha missing: {out}");
+    assert!(out.contains("Beta"), "Beta missing: {out}");
+
+    // Priority + tag + due preserved on T-001 (Alpha)
+    let out = tc_run(dest_root, &["show", "T-001"]);
+    assert!(out.contains("p1"));
+    assert!(out.contains("backend"));
+    assert!(out.contains("2026-12-31"));
+
+    // AC preserved on T-002 (Beta)
+    let out = tc_run(dest_root, &["show", "T-002"]);
+    assert!(out.contains("Tests pass"));
+}
+
+#[test]
+fn export_md_round_trips_through_import() {
+    use std::fs;
+    let dir = setup_project();
+    let root = dir.path();
+
+    tc_run(
+        root,
+        &[
+            "add",
+            "Markdown alpha",
+            "--epic",
+            "docs",
+            "--priority",
+            "p1",
+            "--tag",
+            "writing",
+            "--ac",
+            "Reviewed",
+        ],
+    );
+    tc_run(root, &["add", "Markdown beta", "--epic", "docs"]);
+
+    let md_path = root.join("export.md");
+    tc_run(
+        root,
+        &[
+            "export",
+            "--format",
+            "md",
+            "--output",
+            md_path.to_str().unwrap(),
+        ],
+    );
+    let md = fs::read_to_string(&md_path).expect("read md");
+    assert!(md.contains("## docs"));
+    assert!(md.contains("- [ ] Markdown alpha #writing !p1"), "{md}");
+    assert!(md.contains("  - [ ] Reviewed"));
+
+    let dest = setup_project();
+    let dest_root = dest.path();
+    tc_run(
+        dest_root,
+        &[
+            "import",
+            "--format",
+            "kairo-md",
+            "--file",
+            md_path.to_str().unwrap(),
+            "--epic",
+            "from_md",
+        ],
+    );
+
+    let out = tc_run(dest_root, &["list"]);
+    assert!(out.contains("Markdown alpha"));
+    assert!(out.contains("Markdown beta"));
+
+    let out = tc_run(dest_root, &["show", "T-001"]);
+    assert!(out.contains("p1"));
+    assert!(out.contains("writing"));
+    assert!(out.contains("Reviewed"));
+}
+
+#[test]
+fn export_respects_filter() {
+    let dir = setup_project();
+    let root = dir.path();
+
+    tc_run(
+        root,
+        &["add", "Match this", "--epic", "auth", "--priority", "p1"],
+    );
+    tc_run(
+        root,
+        &["add", "Wrong epic", "--epic", "docs", "--priority", "p1"],
+    );
+    tc_run(
+        root,
+        &[
+            "add",
+            "Wrong priority",
+            "--epic",
+            "auth",
+            "--priority",
+            "p3",
+        ],
+    );
+
+    let out = tc_run(
+        root,
+        &[
+            "export",
+            "--format",
+            "json",
+            "--epic",
+            "auth",
+            "priority:p1",
+        ],
+    );
+    assert!(out.contains("Match this"));
+    assert!(!out.contains("Wrong epic"));
+    assert!(!out.contains("Wrong priority"));
+}
+
+#[test]
+fn stats_shows_priority_and_today_sections() {
+    let dir = setup_project();
+    let root = dir.path();
+
+    let today = chrono::Local::now().date_naive().to_string();
+
+    tc_run(
+        root,
+        &["add", "Critical", "--epic", "be", "--priority", "p1"],
+    );
+    tc_run(root, &["add", "Normal", "--epic", "be", "--priority", "p3"]);
+    tc_run(
+        root,
+        &["add", "On the plate", "--epic", "be", "--due", &today],
+    );
+
+    let out = tc_run(root, &["stats"]);
+    assert!(
+        out.contains("By priority"),
+        "missing priority section: {out}"
+    );
+    assert!(out.contains("p1"));
+    assert!(out.contains("p3"));
+    assert!(out.contains("Today ("), "missing today section: {out}");
+    assert!(out.contains("scheduled or due:  1"));
+}

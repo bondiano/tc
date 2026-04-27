@@ -133,10 +133,168 @@ fn quit_key_stops_running() {
     assert!(!app.running);
 }
 
+// ── M-7.6: fullscreen edit modal ────────────────────────────────────
+
+#[test]
+fn pressing_e_opens_edit_form_prefilled_from_selected_task() {
+    let mut app = app_with(vec![dummy_task("T-001", "alpha", "todo")]);
+    app.update(Message::Key(KeyCode::Char('e'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.screen, AppScreen::CreateTask);
+    let form = app.create_task_form.as_ref().expect("form open");
+    assert!(form.is_editing(), "form should be in edit mode");
+    assert_eq!(form.editing.as_ref().map(|i| i.0.as_str()), Some("T-001"));
+    assert_eq!(form.title.text_single_line(), "Title for T-001");
+    assert_eq!(form.epic.text_single_line(), "alpha");
+}
+
+#[test]
+fn pressing_e_with_no_task_toasts_and_stays_on_main() {
+    let mut app = app_with(vec![]);
+    app.update(Message::Key(KeyCode::Char('e'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.screen, AppScreen::Main);
+    assert!(app.create_task_form.is_none());
+    assert!(
+        app.status_message.contains("no task selected"),
+        "toast: {}",
+        app.status_message
+    );
+}
+
+#[test]
+fn leader_t_e_also_opens_edit_form() {
+    let mut app = app_with(vec![dummy_task("T-001", "alpha", "todo")]);
+    app.update(Message::Key(KeyCode::Char(' '), KeyModifiers::NONE))
+        .unwrap();
+    app.update(Message::Key(KeyCode::Char('t'), KeyModifiers::NONE))
+        .unwrap();
+    app.update(Message::Key(KeyCode::Char('e'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.screen, AppScreen::CreateTask);
+    let form = app.create_task_form.as_ref().expect("form open");
+    assert!(form.is_editing());
+}
+
 impl super::types::App {
     fn open_create_task_form_for_test(&mut self) {
         use crate::create_task::CreateTaskForm;
         self.create_task_form = Some(CreateTaskForm::new("test".into()));
         self.screen = super::types::AppScreen::CreateTask;
+    }
+}
+
+#[cfg(test)]
+mod smart_view_and_fuzzy {
+    //! Tests for M-7.1 (fuzzy ranking) and M-7.2 (smart-view tabs).
+
+    use chrono::{Days, Local};
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    use crate::app::test_support::{app_with, dummy_task};
+    use crate::app::types::SmartView;
+    use crate::event::Message;
+
+    fn press(app: &mut crate::app::App, code: KeyCode) {
+        app.update(Message::Key(code, KeyModifiers::NONE)).unwrap();
+    }
+
+    #[test]
+    fn number_keys_switch_smart_view() {
+        let mut app = app_with(vec![dummy_task("T-001", "alpha", "todo")]);
+        assert_eq!(app.smart_view, SmartView::All);
+        press(&mut app, KeyCode::Char('1'));
+        assert_eq!(app.smart_view, SmartView::Today);
+        press(&mut app, KeyCode::Char('2'));
+        assert_eq!(app.smart_view, SmartView::Upcoming);
+        press(&mut app, KeyCode::Char('3'));
+        assert_eq!(app.smart_view, SmartView::Inbox);
+        press(&mut app, KeyCode::Char('4'));
+        assert_eq!(app.smart_view, SmartView::All);
+    }
+
+    #[test]
+    fn inbox_view_hides_tasks_with_due_date() {
+        let mut with_due = dummy_task("T-001", "alpha", "todo");
+        with_due.due = Some(Local::now().date_naive());
+        let no_due = dummy_task("T-002", "alpha", "todo");
+        let mut app = app_with(vec![with_due, no_due]);
+        app.set_smart_view(SmartView::Inbox);
+        let visible: Vec<String> = app.visible_tasks().iter().map(|t| t.id.0.clone()).collect();
+        assert_eq!(visible, vec!["T-002".to_string()]);
+    }
+
+    #[test]
+    fn today_view_includes_due_today() {
+        let today = Local::now().date_naive();
+        let mut due_today = dummy_task("T-001", "alpha", "todo");
+        due_today.due = Some(today);
+        let due_later = {
+            let mut t = dummy_task("T-002", "alpha", "todo");
+            t.due = today.checked_add_days(Days::new(3));
+            t
+        };
+        let mut app = app_with(vec![due_today, due_later]);
+        app.set_smart_view(SmartView::Today);
+        let visible: Vec<String> = app.visible_tasks().iter().map(|t| t.id.0.clone()).collect();
+        assert_eq!(visible, vec!["T-001".to_string()]);
+    }
+
+    #[test]
+    fn upcoming_view_excludes_today_and_far_future() {
+        let today = Local::now().date_naive();
+        let mut due_today = dummy_task("T-001", "alpha", "todo");
+        due_today.due = Some(today);
+        let mut due_in_3 = dummy_task("T-002", "alpha", "todo");
+        due_in_3.due = today.checked_add_days(Days::new(3));
+        let mut due_in_30 = dummy_task("T-003", "alpha", "todo");
+        due_in_30.due = today.checked_add_days(Days::new(30));
+        let mut app = app_with(vec![due_today, due_in_3, due_in_30]);
+        app.set_smart_view(SmartView::Upcoming);
+        let visible: Vec<String> = app.visible_tasks().iter().map(|t| t.id.0.clone()).collect();
+        assert_eq!(visible, vec!["T-002".to_string()]);
+    }
+
+    #[test]
+    fn fuzzy_query_ranks_better_match_first() {
+        // "fuzz" should match both T-001 and T-003, but the tighter match
+        // should rank ahead. T-002 has nothing relevant and must be filtered.
+        let mut t1 = dummy_task("T-001", "alpha", "todo");
+        t1.title = "fuzzy match search engine".into();
+        let mut t2 = dummy_task("T-002", "alpha", "todo");
+        t2.title = "unrelated task name".into();
+        let mut t3 = dummy_task("T-003", "alpha", "todo");
+        t3.title = "fuzz".into();
+        let mut app = app_with(vec![t1, t2, t3]);
+        app.filter = "fuzz".into();
+        let visible: Vec<String> = app.visible_tasks().iter().map(|t| t.id.0.clone()).collect();
+        assert!(!visible.contains(&"T-002".to_string()));
+        assert!(visible.contains(&"T-001".to_string()));
+        assert!(visible.contains(&"T-003".to_string()));
+    }
+
+    #[test]
+    fn esc_clears_active_fuzzy_filter() {
+        let mut app = app_with(vec![dummy_task("T-001", "alpha", "todo")]);
+        press(&mut app, KeyCode::Char('/'));
+        press(&mut app, KeyCode::Char('x'));
+        assert_eq!(app.filter, "x");
+        press(&mut app, KeyCode::Esc);
+        assert!(app.filter.is_empty(), "Esc should clear fuzzy query");
+    }
+
+    #[test]
+    fn re_entering_fuzzy_mode_restores_previous_query() {
+        // Press / to commit "abc" via Enter, then reopen with / -- the
+        // editor should be pre-populated for refinement (M-7.1).
+        let mut app = app_with(vec![dummy_task("T-001", "alpha", "todo")]);
+        press(&mut app, KeyCode::Char('/'));
+        for c in "abc".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        press(&mut app, KeyCode::Enter); // commit, exit input mode but keep query
+        assert_eq!(app.filter, "abc");
+        press(&mut app, KeyCode::Char('/'));
+        assert_eq!(app.input.text(), "abc");
     }
 }

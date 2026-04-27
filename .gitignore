@@ -5,3 +5,5 @@
 # tc runtime data
 .tc/
 .tc-worktrees/
+
+ROADMAP.md

@@ -11,6 +11,50 @@ struct TasksFile {
     tasks: Vec<Task>,
 }
 
+/// Outcome of a YAML normalization pass.
+///
+/// `changed` is `true` when the on-disk bytes would differ from the bytes we
+/// produce after a load + re-serialize round-trip. That happens whenever the
+/// file is missing fields that the current `Task` schema serializes
+/// unconditionally (e.g. legacy files lacking `priority:`), or whenever
+/// formatting drift exists (key order, whitespace).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationReport {
+    pub tasks_loaded: usize,
+    pub bytes_before: usize,
+    pub bytes_after: usize,
+    pub changed: bool,
+}
+
+/// Compute what migrating `path` would produce, without writing.
+///
+/// Returns `(report, normalized_yaml)`. Callers may inspect the report,
+/// print a diff using the YAML, or pass the YAML to [`write_atomic`].
+pub fn plan_migration(path: &Path) -> StorageResult<(MigrationReport, String)> {
+    let original = std::fs::read_to_string(path).map_err(|e| StorageError::file_read(path, e))?;
+    let file: TasksFile =
+        serde_yaml_ng::from_str(&original).map_err(|e| StorageError::yaml_parse(path, e))?;
+
+    let normalized = serde_yaml_ng::to_string(&file).map_err(StorageError::YamlSerialize)?;
+    let report = MigrationReport {
+        tasks_loaded: file.tasks.len(),
+        bytes_before: original.len(),
+        bytes_after: normalized.len(),
+        changed: original != normalized,
+    };
+    Ok((report, normalized))
+}
+
+/// Atomically rewrite `path` to its normalized form. No-op-safe: even when
+/// the bytes are identical, callers can still call this without harm.
+pub fn migrate(path: &Path) -> StorageResult<MigrationReport> {
+    let (report, normalized) = plan_migration(path)?;
+    if report.changed {
+        write_atomic(path, normalized.as_bytes())?;
+    }
+    Ok(report)
+}
+
 pub fn load(path: &Path) -> StorageResult<Vec<Task>> {
     let content = std::fs::read_to_string(path).map_err(|e| StorageError::file_read(path, e))?;
     let file: TasksFile =
@@ -76,6 +120,10 @@ mod tests {
             epic: "test".to_string(),
             status: StatusId("todo".to_string()),
             priority: tc_core::task::Priority::default(),
+            tags: vec![],
+            due: None,
+            scheduled: None,
+            estimate: None,
             depends_on: vec![],
             files: vec![],
             pack_exclude: vec![],
@@ -177,7 +225,7 @@ mod tests {
         task.notes = "Important notes".into();
         task.acceptance_criteria = vec!["Works".into()];
         task.assignee = Some(tc_core::task::Assignee::Claude);
-        task.priority = tc_core::task::Priority::Critical;
+        task.priority = tc_core::task::Priority::P1;
 
         save(&path, &[task]).unwrap();
         let loaded = load(&path).unwrap();
@@ -189,7 +237,7 @@ mod tests {
         assert_eq!(loaded[0].notes, "Important notes");
         assert_eq!(loaded[0].acceptance_criteria, vec!["Works"]);
         assert!(loaded[0].assignee.is_some());
-        assert_eq!(loaded[0].priority, tc_core::task::Priority::Critical);
+        assert_eq!(loaded[0].priority, tc_core::task::Priority::P1);
     }
 
     #[test]
@@ -197,23 +245,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tasks.yaml");
         let mut task = make_task("T-001");
-        task.priority = tc_core::task::Priority::High;
+        task.priority = tc_core::task::Priority::P2;
 
         save(&path, &[task]).unwrap();
         let loaded = load(&path).unwrap();
 
-        assert_eq!(loaded[0].priority, tc_core::task::Priority::High);
+        assert_eq!(loaded[0].priority, tc_core::task::Priority::P2);
     }
 
     #[test]
-    fn roundtrip_priority_defaults_to_normal() {
+    fn roundtrip_priority_defaults_to_p3() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tasks.yaml");
         // Write YAML without priority field to test backward compatibility
         std::fs::write(&path, "tasks:\n- id: T-001\n  title: Test\n  epic: be\n  status: todo\n  assignee: null\n  created_at: 2025-01-01T00:00:00Z\n").unwrap();
         let loaded = load(&path).unwrap();
 
-        assert_eq!(loaded[0].priority, tc_core::task::Priority::Normal);
+        assert_eq!(loaded[0].priority, tc_core::task::Priority::P3);
     }
 
     #[test]
@@ -252,6 +300,86 @@ mod tests {
         // T-003 directly.
         let tasks = vec![make_task("T-001"), make_task("T-002"), make_task("T-003")];
         assert_eq!(next_id(&tasks).0, "T-004");
+    }
+
+    const LEGACY_TASKS_YAML: &str = "tasks:\n- id: T-100\n  title: Pre-6.1 task\n  epic: legacy\n  status: todo\n  assignee: null\n  created_at: 2026-01-01T00:00:00Z\n";
+
+    #[test]
+    fn legacy_yaml_loads_with_extension_field_defaults() {
+        // A file written before M-6.1 (no priority/tags/due/scheduled/estimate)
+        // must continue to load -- this is the migration contract M-6.2 commits to.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.yaml");
+        std::fs::write(&path, LEGACY_TASKS_YAML).unwrap();
+
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.len(), 1);
+        let t = &loaded[0];
+        assert_eq!(t.priority, tc_core::task::Priority::P3);
+        assert!(t.tags.is_empty());
+        assert!(t.due.is_none());
+        assert!(t.scheduled.is_none());
+        assert!(t.estimate.is_none());
+    }
+
+    #[test]
+    fn migrate_legacy_file_marks_changed_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.yaml");
+        std::fs::write(&path, LEGACY_TASKS_YAML).unwrap();
+
+        let report = migrate(&path).unwrap();
+        assert_eq!(report.tasks_loaded, 1);
+        assert!(
+            report.changed,
+            "legacy file lacks priority and must be rewritten"
+        );
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("priority: p3"),
+            "rewrite should populate priority explicitly: {written}"
+        );
+        // Empty extension fields must stay omitted to keep diffs small.
+        assert!(!written.contains("tags:"), "empty tags must not be emitted");
+        assert!(!written.contains("due:"), "missing due must not be emitted");
+        assert!(
+            !written.contains("estimate:"),
+            "missing estimate must not be emitted"
+        );
+    }
+
+    #[test]
+    fn migrate_already_normalized_file_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.yaml");
+        let tasks = vec![make_task("T-001"), make_task("T-002")];
+        save(&path, &tasks).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        let report = migrate(&path).unwrap();
+        assert_eq!(report.tasks_loaded, 2);
+        assert!(
+            !report.changed,
+            "saved-then-migrated file should be byte-identical"
+        );
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn plan_migration_does_not_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.yaml");
+        std::fs::write(&path, LEGACY_TASKS_YAML).unwrap();
+
+        let (report, normalized) = plan_migration(&path).unwrap();
+        assert!(report.changed);
+        assert!(normalized.contains("priority: p3"));
+
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(on_disk, LEGACY_TASKS_YAML, "plan_migration must not write");
     }
 
     #[test]

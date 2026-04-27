@@ -7,4 +7,5 @@ pub mod event;
 pub mod keybind;
 pub mod log_view;
 pub mod runtime;
+pub mod theme;
 pub mod ui;

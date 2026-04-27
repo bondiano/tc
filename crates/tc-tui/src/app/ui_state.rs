@@ -140,6 +140,11 @@ impl App {
         if mode == InputMode::AddTask {
             self.restore_draft();
         }
+        // Pre-fill the fuzzy editor with the active filter so users can
+        // refine an existing query without retyping it (M-7.1).
+        if mode == InputMode::Filter && !self.filter.is_empty() {
+            self.input.set_text(&self.filter);
+        }
     }
 
     pub(super) fn draft_path(&self) -> std::path::PathBuf {
@@ -176,6 +181,12 @@ impl App {
         }
         if self.input_mode == InputMode::LogSearch {
             self.log_view.clear_search();
+        }
+        // M-7.1: Esc on the fuzzy finder clears the active query so the user
+        // gets a one-keystroke way to drop the filter.
+        if self.input_mode == InputMode::Filter {
+            self.filter.clear();
+            self.selected_task = 0;
         }
         self.input_mode = InputMode::Normal;
         self.input.clear();

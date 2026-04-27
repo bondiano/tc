@@ -17,8 +17,18 @@ pub fn render(app: &App, frame: &mut Frame<'_>, area: Rect) {
 
     let focused = app.focus == FocusPanel::Epics;
     let title = if focused { "[ Epics ]" } else { " Epics " };
+    let border_color = if focused {
+        app.palette.border_focused
+    } else {
+        app.palette.border
+    };
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(title))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border_color))
+                .title(title),
+        )
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .highlight_symbol("> ");
 

@@ -36,11 +36,14 @@ tc-tui = { path = "crates/tc-tui", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_yaml_ng = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
+humantime = "2"
+humantime-serde = "1"
 thiserror = "2"
 anyhow = "1"
 miette = { version = "7", features = ["fancy"] }
 petgraph = "0.8"
 minijinja = "2"
+nucleo-matcher = "0.3"
 ignore = "0.4"
 globset = "0.4"
 which = "8"
@@ -51,3 +54,4 @@ crossterm = "0.29"
 tokio = { version = "1", features = ["process", "io-util", "rt-multi-thread", "macros", "time", "fs"] }
 reqwest = { version = "0.13", features = ["json"] }
 serde_json = "1"
+csv = "1"

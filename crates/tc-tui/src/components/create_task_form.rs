@@ -79,16 +79,18 @@ pub fn render(app: &App, frame: &mut Frame<'_>) {
         .constraints([Constraint::Length(1), Constraint::Min(5)])
         .split(area);
 
-    render_hint_bar(frame, chunks[0]);
+    render_hint_bar(form, frame, chunks[0]);
     render_form_body(app, form, frame, chunks[1]);
 }
 
-fn render_hint_bar(frame: &mut Frame<'_>, area: Rect) {
+fn render_hint_bar(form: &CreateTaskForm, frame: &mut Frame<'_>, area: Rect) {
+    let title = if let Some(id) = &form.editing {
+        format!(" Edit Task {}", id.0)
+    } else {
+        " Create Task".to_string()
+    };
     let line = Line::from(vec![
-        Span::styled(
-            " Create Task",
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(title, Style::default().add_modifier(Modifier::BOLD)),
         Span::styled(
             "  [Ctrl+S] save · [Tab] next · [Shift+Tab] prev · [Esc] cancel",
             Style::default().fg(Color::DarkGray),

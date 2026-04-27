@@ -16,12 +16,16 @@ impl App {
         let Some(t) = self.selected_task() else {
             return Ok(());
         };
+        let was_terminal = self.status_machine.is_terminal(&t.status);
         let mut new_tasks = self.tasks.clone();
         if let Some(target) = new_tasks.iter_mut().find(|x| x.id == t.id) {
             target.status = StatusId("done".into());
         }
         self.store.save_tasks(&new_tasks)?;
         self.reload_tasks()?;
+        if !was_terminal {
+            self.mark_completed(&t.id);
+        }
         self.toast(&format!("marked {} done", t.id.0));
         Ok(())
     }
@@ -196,6 +200,7 @@ impl App {
 
         match merge_worktree(&worktree_mgr, &task.id, &task_title) {
             Ok(MergeResult::Success) => {
+                let was_terminal = self.status_machine.is_terminal(&task.status);
                 let mut tasks = self.tasks.clone();
                 if let Some(target) = tasks.iter_mut().find(|t| t.id == task.id) {
                     target.status = StatusId("done".into());
@@ -203,6 +208,9 @@ impl App {
                 self.store.save_tasks(&tasks)?;
                 self.reload_tasks()?;
                 self.refresh_workers();
+                if !was_terminal {
+                    self.mark_completed(&task.id);
+                }
                 self.toast(&format!("{} merged successfully", task.id));
             }
             Ok(MergeResult::Conflict { details }) => {
@@ -222,6 +230,18 @@ impl App {
             self.current_epic().to_string()
         };
         self.create_task_form = Some(CreateTaskForm::new(epic));
+        self.screen = AppScreen::CreateTask;
+    }
+
+    /// Open the fullscreen task form pre-filled with the selected task
+    /// (M-7.6). The submit path is shared with create -- distinguished by
+    /// `CreateTaskForm::editing`.
+    pub(super) fn open_edit_task_form(&mut self) {
+        let Some(task) = self.selected_task() else {
+            self.toast("edit: no task selected");
+            return;
+        };
+        self.create_task_form = Some(CreateTaskForm::from_task(&task));
         self.screen = AppScreen::CreateTask;
     }
 
@@ -249,6 +269,10 @@ impl App {
             }
         };
 
+        if let Some(editing_id) = form.editing.clone() {
+            return self.submit_edit_task(form, editing_id, title.to_string(), epic);
+        }
+
         let id = self.store.next_task_id(&self.tasks);
         let task = Task {
             id: id.clone(),
@@ -256,6 +280,10 @@ impl App {
             epic,
             status: StatusId("todo".into()),
             priority: form.priority,
+            tags: vec![],
+            due: None,
+            scheduled: None,
+            estimate: None,
             depends_on: form.depends_on,
             files: form.files,
             pack_exclude: vec![],
@@ -272,5 +300,47 @@ impl App {
         self.screen = AppScreen::Main;
         self.toast(&format!("added {}", id.0));
         Ok(())
+    }
+
+    /// Apply a task-form submission for an existing task. Status, tags, due,
+    /// scheduled, and estimate are preserved -- the form covers the same
+    /// fields as create, so anything outside it stays as-is.
+    fn submit_edit_task(
+        &mut self,
+        form: CreateTaskForm,
+        id: tc_core::task::TaskId,
+        title: String,
+        epic: String,
+    ) -> TuiResult<()> {
+        let id_for_msg = id.0.clone();
+        let result = self.store.update_tasks(|tasks| {
+            let task = tasks
+                .iter_mut()
+                .find(|t| t.id == id)
+                .ok_or_else(|| tc_core::error::CoreError::TaskNotFound(id.0.clone()))?;
+            task.title = title;
+            task.epic = epic;
+            task.priority = form.priority;
+            task.assignee = form.assignee;
+            task.depends_on = form.depends_on;
+            task.files = form.files;
+            task.notes = form.notes.text();
+            task.acceptance_criteria = form.acceptance_criteria;
+            Ok(())
+        });
+
+        match result {
+            Ok(()) => {
+                self.reload_tasks()?;
+                self.screen = AppScreen::Main;
+                self.toast(&format!("updated {id_for_msg}"));
+                Ok(())
+            }
+            Err(e) => {
+                self.toast(&format!("edit failed: {e}"));
+                self.screen = AppScreen::Main;
+                Ok(())
+            }
+        }
     }
 }

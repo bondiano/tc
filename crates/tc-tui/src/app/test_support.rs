@@ -1,9 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use chrono::Utc;
 use tc_core::config::{
     ExecutionMode, ExecutorConfig, ExecutorKind, PackerConfig, ResolverConfig, SandboxConfig,
-    SpawnConfig, TcConfig, VerificationConfig,
+    SpawnConfig, TcConfig, UiConfig, VerificationConfig,
 };
 use tc_core::dag::TaskDag;
 use tc_core::status::{StatusDef, StatusId, StatusMachine};
@@ -13,8 +13,9 @@ use tc_storage::Store;
 use crate::editor::Editor;
 use crate::keybind::PendingChord;
 use crate::log_view::LogView;
+use crate::theme::{self, Palette};
 
-use super::types::{App, AppScreen, FocusPanel, InputMode, TuiAction};
+use super::types::{App, AppScreen, FocusPanel, InputMode, SmartView, TuiAction};
 
 pub fn dummy_config() -> TcConfig {
     TcConfig {
@@ -67,6 +68,7 @@ pub fn dummy_config() -> TcConfig {
             on_complete: "pr".into(),
         },
         verification: VerificationConfig::default(),
+        ui: UiConfig::default(),
     }
 }
 
@@ -77,6 +79,10 @@ pub fn dummy_task(id: &str, epic: &str, status: &str) -> Task {
         epic: epic.into(),
         status: StatusId(status.into()),
         priority: tc_core::task::Priority::default(),
+        tags: vec![],
+        due: None,
+        scheduled: None,
+        estimate: None,
         depends_on: vec![],
         files: vec![],
         pack_exclude: vec![],
@@ -96,6 +102,7 @@ pub fn app_with(tasks: Vec<Task>) -> App {
     let _ = std::fs::create_dir_all(store_root.join(".tc"));
     let store = Store::open(store_root).expect("store");
     let _ = std::fs::remove_file(store.draft_add_task_path());
+    let palette = Palette::from_theme(&theme::resolve(&config.ui.theme));
     let mut app = App {
         store,
         config,
@@ -119,6 +126,7 @@ pub fn app_with(tasks: Vec<Task>) -> App {
         input_mode: InputMode::Normal,
         input: Editor::new(),
         filter: String::new(),
+        smart_view: SmartView::default(),
         status_message: "ready".into(),
         log_view: LogView::new(),
         pending_chord: PendingChord::None,
@@ -128,6 +136,8 @@ pub fn app_with(tasks: Vec<Task>) -> App {
         screen: AppScreen::Main,
         create_task_form: None,
         settings: None,
+        palette,
+        completion_animations: HashMap::new(),
     };
     app.recompute_epics();
     app

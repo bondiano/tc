@@ -1,16 +1,284 @@
-use chrono::Utc;
+use std::time::Duration;
+
+use chrono::{NaiveDate, Utc};
 use serde::Deserialize;
 use tc_core::status::StatusId;
-use tc_core::task::Task;
+use tc_core::task::{Priority, Task};
 
-use crate::cli::{GithubImportArgs, ImportArgs, ImportSource, LinearImportArgs};
+use crate::cli::{GithubImportArgs, ImportArgs, ImportFormat, ImportSource, LinearImportArgs};
 use crate::error::CliError;
 use crate::output;
 
 pub async fn run(args: ImportArgs) -> Result<(), CliError> {
+    if args.format.is_some() && args.source.is_some() {
+        return Err(CliError::user(
+            "tc import: --format is mutually exclusive with the github/linear subcommands",
+        ));
+    }
+    if let Some(format) = args.format {
+        return run_file(format, args).await;
+    }
     match args.source {
-        ImportSource::Github(gh) => import_github(gh).await,
-        ImportSource::Linear(lin) => import_linear(lin).await,
+        Some(ImportSource::Github(gh)) => import_github(gh, args.dry_run).await,
+        Some(ImportSource::Linear(lin)) => import_linear(lin, args.dry_run).await,
+        None => Err(CliError::user(
+            "tc import: pass `--format <json|kairo-md|linear-csv> --file <path> --epic <name>` \
+             or use a subcommand: `tc import github`, `tc import linear`",
+        )),
+    }
+}
+
+// ── File-based import (M-6.7) ──────────────────────────────────────────
+
+async fn run_file(format: ImportFormat, args: ImportArgs) -> Result<(), CliError> {
+    let path = args
+        .file
+        .ok_or_else(|| CliError::user("--file <path> is required with --format"))?;
+    let epic = args
+        .epic
+        .ok_or_else(|| CliError::user("--epic <name> is required with --format"))?;
+
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| CliError::user(format!("read {}: {e}", path.display())))?;
+
+    let records = match format {
+        ImportFormat::Json => parse_json(&raw)?,
+        ImportFormat::KairoMd => parse_kairo_md(&raw),
+        ImportFormat::LinearCsv => parse_linear_csv(&raw)?,
+    };
+
+    if records.is_empty() {
+        output::print_warning(&format!("No tasks found in {}", path.display()));
+        return Ok(());
+    }
+
+    apply_imports(records, &epic, args.dry_run, &path.display().to_string())
+}
+
+// JSON: array of records. Title is the only required field.
+#[derive(Debug, Deserialize)]
+struct JsonRecord {
+    title: String,
+    #[serde(default)]
+    epic: Option<String>,
+    #[serde(default)]
+    priority: Option<Priority>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    due: Option<NaiveDate>,
+    #[serde(default)]
+    scheduled: Option<NaiveDate>,
+    #[serde(default, with = "humantime_serde")]
+    estimate: Option<Duration>,
+    #[serde(default)]
+    notes: String,
+    #[serde(default)]
+    acceptance_criteria: Vec<String>,
+    /// Optional stable identifier for dedup. If set, we record it as
+    /// "Imported from: <source_ref>" in notes -- same convention used by
+    /// the GitHub/Linear importers so re-runs skip what's already there.
+    #[serde(default)]
+    source_ref: Option<String>,
+}
+
+fn parse_json(raw: &str) -> Result<Vec<ImportRecord>, CliError> {
+    let records: Vec<JsonRecord> =
+        serde_json::from_str(raw).map_err(|e| CliError::user(format!("invalid JSON: {e}")))?;
+
+    Ok(records
+        .into_iter()
+        .map(|r| ImportRecord {
+            source_ref: r.source_ref,
+            title: r.title,
+            epic_override: r.epic,
+            priority: r.priority.unwrap_or_default(),
+            tags: r.tags,
+            due: r.due,
+            scheduled: r.scheduled,
+            estimate: r.estimate,
+            notes: r.notes,
+            acceptance_criteria: r.acceptance_criteria,
+        })
+        .collect())
+}
+
+// Kairo-style markdown:
+//   - [ ] Title #tag1 #tag2 !p1 due:2026-05-01
+// Indented bullets become acceptance criteria for the parent task. Anything
+// else is ignored, so users can drop a list inside a larger note file.
+fn parse_kairo_md(raw: &str) -> Vec<ImportRecord> {
+    let mut out: Vec<ImportRecord> = Vec::new();
+    'lines: for line in raw.lines() {
+        let trimmed = line.trim_start();
+        let indent = line.len() - trimmed.len();
+
+        let Some(rest) = trimmed
+            .strip_prefix("- [ ] ")
+            .or_else(|| trimmed.strip_prefix("- [x] "))
+            .or_else(|| trimmed.strip_prefix("- [X] "))
+        else {
+            continue 'lines;
+        };
+
+        if indent > 0
+            && let Some(parent) = out.last_mut()
+        {
+            parent.acceptance_criteria.push(rest.trim().to_string());
+            continue 'lines;
+        }
+
+        out.push(parse_kairo_line(rest));
+    }
+    out
+}
+
+fn parse_kairo_line(rest: &str) -> ImportRecord {
+    let mut tags = Vec::new();
+    let mut priority = Priority::default();
+    let mut due: Option<NaiveDate> = None;
+    let mut scheduled: Option<NaiveDate> = None;
+    let mut title_parts: Vec<&str> = Vec::new();
+
+    'tokens: for tok in rest.split_whitespace() {
+        if let Some(tag) = tok.strip_prefix('#') {
+            tags.push(tag.to_string());
+            continue 'tokens;
+        }
+        if let Some(prio_str) = tok.strip_prefix('!') {
+            if let Some(p) = parse_priority_token(prio_str) {
+                priority = p;
+                continue 'tokens;
+            }
+        }
+        if let Some(d) = tok.strip_prefix("due:") {
+            if let Ok(date) = NaiveDate::parse_from_str(d, "%Y-%m-%d") {
+                due = Some(date);
+                continue 'tokens;
+            }
+        }
+        if let Some(d) = tok.strip_prefix("scheduled:") {
+            if let Ok(date) = NaiveDate::parse_from_str(d, "%Y-%m-%d") {
+                scheduled = Some(date);
+                continue 'tokens;
+            }
+        }
+        title_parts.push(tok);
+    }
+
+    ImportRecord {
+        source_ref: None,
+        title: title_parts.join(" "),
+        epic_override: None,
+        priority,
+        tags,
+        due,
+        scheduled,
+        estimate: None,
+        notes: String::new(),
+        acceptance_criteria: Vec::new(),
+    }
+}
+
+fn parse_priority_token(s: &str) -> Option<Priority> {
+    match s.to_lowercase().as_str() {
+        "p1" | "1" => Some(Priority::P1),
+        "p2" | "2" => Some(Priority::P2),
+        "p3" | "3" => Some(Priority::P3),
+        "p4" | "4" => Some(Priority::P4),
+        "p5" | "5" => Some(Priority::P5),
+        _ => None,
+    }
+}
+
+// Linear CSV export columns (case-insensitive lookup; we accept the standard
+// "ID, Title, Description, Priority, Status, Labels" header set Linear emits).
+fn parse_linear_csv(raw: &str) -> Result<Vec<ImportRecord>, CliError> {
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .flexible(true)
+        .from_reader(raw.as_bytes());
+
+    let header = reader
+        .headers()
+        .map_err(|e| CliError::user(format!("invalid CSV header: {e}")))?
+        .clone();
+
+    let idx = |name: &str| header.iter().position(|h| h.eq_ignore_ascii_case(name));
+
+    let i_id = idx("ID").or_else(|| idx("Identifier"));
+    let i_title = idx("Title")
+        .or_else(|| idx("Name"))
+        .ok_or_else(|| CliError::user("CSV missing required Title column"))?;
+    let i_desc = idx("Description").or_else(|| idx("Body"));
+    let i_priority = idx("Priority");
+    let i_labels = idx("Labels").or_else(|| idx("Tags"));
+    let i_due = idx("Due Date").or_else(|| idx("Due"));
+
+    let mut out = Vec::new();
+    for record in reader.records() {
+        let row = record.map_err(|e| CliError::user(format!("CSV row error: {e}")))?;
+
+        let title = row.get(i_title).unwrap_or("").trim();
+        if title.is_empty() {
+            continue;
+        }
+
+        let priority = i_priority
+            .and_then(|i| row.get(i))
+            .and_then(linear_priority_from_str)
+            .unwrap_or_default();
+
+        let tags = i_labels
+            .and_then(|i| row.get(i))
+            .map(|s| {
+                s.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let due = i_due.and_then(|i| row.get(i)).and_then(|s| {
+            let s = s.trim();
+            if s.is_empty() {
+                None
+            } else {
+                NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
+            }
+        });
+
+        out.push(ImportRecord {
+            source_ref: i_id.and_then(|i| row.get(i)).map(str::to_string),
+            title: title.to_string(),
+            epic_override: None,
+            priority,
+            tags,
+            due,
+            scheduled: None,
+            estimate: None,
+            notes: i_desc
+                .and_then(|i| row.get(i))
+                .map(str::to_string)
+                .unwrap_or_default(),
+            acceptance_criteria: Vec::new(),
+        });
+    }
+
+    Ok(out)
+}
+
+fn linear_priority_from_str(s: &str) -> Option<Priority> {
+    // Linear exports priority as either "Urgent/High/Medium/Low/No priority"
+    // or as numeric 1..4 (1=urgent). Map to our P1..P5.
+    match s.trim().to_lowercase().as_str() {
+        "urgent" | "1" => Some(Priority::P1),
+        "high" | "2" => Some(Priority::P2),
+        "medium" | "normal" | "3" => Some(Priority::P3),
+        "low" | "4" => Some(Priority::P4),
+        "no priority" | "" | "0" => Some(Priority::P5),
+        _ => None,
     }
 }
 
@@ -30,9 +298,6 @@ struct GithubLabel {
 }
 
 /// Parse the GitHub pagination `Link` header and return the URL for `rel="next"`.
-///
-/// GitHub responses look like:
-/// `Link: <https://api.github.com/...?page=2>; rel="next", <...>; rel="last"`.
 fn parse_github_next_link(header: Option<&reqwest::header::HeaderValue>) -> Option<String> {
     let raw = header?.to_str().ok()?;
     'parts: for part in raw.split(',') {
@@ -59,7 +324,6 @@ fn github_token() -> Result<String, CliError> {
     if let Ok(token) = std::env::var("GITHUB_TOKEN") {
         return Ok(token);
     }
-    // Fallback: try `gh auth token`
     let output = std::process::Command::new("gh")
         .args(["auth", "token"])
         .output()
@@ -80,7 +344,7 @@ fn github_token() -> Result<String, CliError> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-async fn import_github(args: GithubImportArgs) -> Result<(), CliError> {
+async fn import_github(args: GithubImportArgs, dry_run_flag: bool) -> Result<(), CliError> {
     let token = github_token()?;
     let client = reqwest::Client::new();
 
@@ -96,8 +360,6 @@ async fn import_github(args: GithubImportArgs) -> Result<(), CliError> {
         url.push_str(&format!("&milestone={milestone}"));
     }
 
-    // Paginate through GitHub's `Link: <...>; rel="next"` header. Without
-    // this, any repo with more than 100 matching issues silently truncated.
     let mut issues: Vec<GithubIssue> = Vec::new();
     let mut next_url = Some(url);
     const MAX_PAGES: usize = 100;
@@ -142,7 +404,6 @@ async fn import_github(args: GithubImportArgs) -> Result<(), CliError> {
         issues.extend(page_issues);
     }
 
-    // Filter out pull requests (GitHub API returns PRs as issues too)
     let issues: Vec<&GithubIssue> = issues
         .iter()
         .filter(|i| !i.labels.iter().any(|l| l.name == "pull_request"))
@@ -153,22 +414,27 @@ async fn import_github(args: GithubImportArgs) -> Result<(), CliError> {
         return Ok(());
     }
 
-    create_tasks_from_external(
-        &issues
-            .iter()
-            .map(|i| ExternalIssue {
-                source_ref: format!("{}#{}", args.repo, i.number),
-                title: i.title.clone(),
-                body: i.body.clone().unwrap_or_default(),
-                labels: i.labels.iter().map(|l| l.name.clone()).collect(),
-            })
-            .collect::<Vec<_>>(),
-        &args.epic,
-        args.dry_run,
-    )
+    let dry_run = args.dry_run || dry_run_flag;
+    let records: Vec<ImportRecord> = issues
+        .iter()
+        .map(|i| ImportRecord {
+            source_ref: Some(format!("{}#{}", args.repo, i.number)),
+            title: i.title.clone(),
+            epic_override: None,
+            priority: Priority::default(),
+            tags: i.labels.iter().map(|l| l.name.clone()).collect(),
+            due: None,
+            scheduled: None,
+            estimate: None,
+            notes: i.body.clone().unwrap_or_default(),
+            acceptance_criteria: Vec::new(),
+        })
+        .collect();
+
+    apply_imports(records, &args.epic, dry_run, "github")
 }
 
-// ── Linear ──────────────────────────────────────────────────────────
+// ── Linear (GraphQL) ──────────────────────────────────────────────────
 
 fn linear_api_key() -> Result<String, CliError> {
     std::env::var("LINEAR_API_KEY").map_err(|_| {
@@ -206,7 +472,6 @@ struct LinearIssue {
     title: String,
     description: Option<String>,
     labels: LinearLabelConnection,
-    // Requested in GraphQL query for completeness; not read locally.
     #[allow(dead_code)]
     state: LinearState,
     #[allow(dead_code)]
@@ -235,7 +500,7 @@ struct LinearProject {
     name: String,
 }
 
-async fn import_linear(args: LinearImportArgs) -> Result<(), CliError> {
+async fn import_linear(args: LinearImportArgs, dry_run_flag: bool) -> Result<(), CliError> {
     let api_key = linear_api_key()?;
     let client = reqwest::Client::new();
 
@@ -333,39 +598,54 @@ async fn import_linear(args: LinearImportArgs) -> Result<(), CliError> {
         return Ok(());
     }
 
-    create_tasks_from_external(
-        &issues
-            .iter()
-            .map(|i| ExternalIssue {
-                source_ref: i.identifier.clone(),
-                title: i.title.clone(),
-                body: i.description.clone().unwrap_or_default(),
-                labels: i.labels.nodes.iter().map(|l| l.name.clone()).collect(),
-            })
-            .collect::<Vec<_>>(),
-        &args.epic,
-        args.dry_run,
-    )
+    let dry_run = args.dry_run || dry_run_flag;
+    let records: Vec<ImportRecord> = issues
+        .iter()
+        .map(|i| ImportRecord {
+            source_ref: Some(i.identifier.clone()),
+            title: i.title.clone(),
+            epic_override: None,
+            priority: Priority::default(),
+            tags: i.labels.nodes.iter().map(|l| l.name.clone()).collect(),
+            due: None,
+            scheduled: None,
+            estimate: None,
+            notes: i.description.clone().unwrap_or_default(),
+            acceptance_criteria: Vec::new(),
+        })
+        .collect();
+
+    apply_imports(records, &args.epic, dry_run, "linear")
 }
 
-// ── Shared task creation ────────────────────────────────────────────
+// ── Shared apply pipeline ───────────────────────────────────────────
 
-struct ExternalIssue {
-    source_ref: String,
+#[derive(Debug, Clone)]
+struct ImportRecord {
+    /// Optional stable key used for dedup -- recorded in notes as
+    /// "Imported from: <source_ref>" so re-running the import is a no-op.
+    source_ref: Option<String>,
     title: String,
-    body: String,
-    labels: Vec<String>,
+    /// Per-record epic override; falls back to the import-wide epic.
+    epic_override: Option<String>,
+    priority: Priority,
+    tags: Vec<String>,
+    due: Option<NaiveDate>,
+    scheduled: Option<NaiveDate>,
+    estimate: Option<Duration>,
+    notes: String,
+    acceptance_criteria: Vec<String>,
 }
 
-fn create_tasks_from_external(
-    issues: &[ExternalIssue],
-    epic: &str,
+fn apply_imports(
+    records: Vec<ImportRecord>,
+    default_epic: &str,
     dry_run: bool,
+    source_label: &str,
 ) -> Result<(), CliError> {
     let store = tc_storage::Store::discover()?;
     let mut tasks = store.load_tasks()?;
 
-    // Detect already-imported issues by checking notes for source_ref
     let already_imported: std::collections::HashSet<String> = tasks
         .iter()
         .filter_map(|t| {
@@ -379,44 +659,57 @@ fn create_tasks_from_external(
     let mut created = Vec::new();
     let mut skipped = Vec::new();
 
-    for issue in issues {
-        if already_imported.contains(&issue.source_ref) {
-            skipped.push(&issue.source_ref);
+    for r in records {
+        if let Some(ref source_ref) = r.source_ref
+            && already_imported.contains(source_ref)
+        {
+            skipped.push(source_ref.clone());
             continue;
         }
 
+        let label = r
+            .source_ref
+            .clone()
+            .unwrap_or_else(|| format!("{source_label}: {}", r.title));
+
         if dry_run {
-            created.push(format!("[dry-run] {}: {}", issue.source_ref, issue.title));
+            created.push(format!("[dry-run] {label}: {}", r.title));
             continue;
         }
 
         let id = store.next_task_id(&tasks);
 
-        let mut notes = format!("Imported from: {}", issue.source_ref);
-        if !issue.body.is_empty() {
-            notes.push_str("\n\n");
-            notes.push_str(&issue.body);
+        let mut notes = String::new();
+        if let Some(ref source_ref) = r.source_ref {
+            notes.push_str(&format!("Imported from: {source_ref}"));
         }
-        if !issue.labels.is_empty() {
-            notes.push_str(&format!("\n\nLabels: {}", issue.labels.join(", ")));
+        if !r.notes.is_empty() {
+            if !notes.is_empty() {
+                notes.push_str("\n\n");
+            }
+            notes.push_str(&r.notes);
         }
 
         let task = Task {
             id: id.clone(),
-            title: issue.title.clone(),
-            epic: epic.to_string(),
+            title: r.title.clone(),
+            epic: r.epic_override.unwrap_or_else(|| default_epic.to_string()),
             status: StatusId("todo".to_string()),
-            priority: Default::default(),
+            priority: r.priority,
+            tags: r.tags,
+            due: r.due,
+            scheduled: r.scheduled,
+            estimate: r.estimate,
             depends_on: vec![],
             files: vec![],
             pack_exclude: vec![],
             notes,
-            acceptance_criteria: vec![],
+            acceptance_criteria: r.acceptance_criteria,
             assignee: None,
             created_at: Utc::now(),
         };
 
-        created.push(format!("{id}: {}", issue.title));
+        created.push(format!("{id}: {}", r.title));
         tasks.push(task);
     }
 
@@ -426,13 +719,9 @@ fn create_tasks_from_external(
 
     if !skipped.is_empty() {
         output::print_warning(&format!(
-            "Skipped {} already-imported issue(s): {}",
+            "Skipped {} already-imported record(s): {}",
             skipped.len(),
-            skipped
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            skipped.join(", ")
         ));
     }
 
@@ -461,22 +750,118 @@ mod tests {
     use super::*;
 
     #[test]
-    fn external_issue_to_task_notes_format() {
-        let issue = ExternalIssue {
-            source_ref: "owner/repo#42".to_string(),
-            title: "Fix login bug".to_string(),
-            body: "Users cannot login".to_string(),
-            labels: vec!["bug".to_string(), "auth".to_string()],
-        };
+    fn parse_json_minimal() {
+        let raw = r#"[{"title": "Hello"}]"#;
+        let recs = parse_json(raw).unwrap();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].title, "Hello");
+        assert_eq!(recs[0].priority, Priority::P3);
+    }
 
-        let mut notes = format!("Imported from: {}", issue.source_ref);
-        notes.push_str("\n\n");
-        notes.push_str(&issue.body);
-        notes.push_str(&format!("\n\nLabels: {}", issue.labels.join(", ")));
+    #[test]
+    fn parse_json_full() {
+        let raw = r#"[
+            {
+                "title": "Build login",
+                "priority": "p1",
+                "tags": ["backend", "auth"],
+                "due": "2026-05-01",
+                "estimate": "2h 30m",
+                "notes": "see RFC",
+                "acceptance_criteria": ["tests pass"],
+                "source_ref": "spec#42"
+            }
+        ]"#;
+        let recs = parse_json(raw).unwrap();
+        assert_eq!(recs.len(), 1);
+        let r = &recs[0];
+        assert_eq!(r.priority, Priority::P1);
+        assert_eq!(r.tags, vec!["backend", "auth"]);
+        assert_eq!(r.due, NaiveDate::from_ymd_opt(2026, 5, 1));
+        assert_eq!(r.estimate, Some(Duration::from_secs(2 * 3600 + 30 * 60)));
+        assert_eq!(r.acceptance_criteria, vec!["tests pass"]);
+        assert_eq!(r.source_ref.as_deref(), Some("spec#42"));
+    }
 
-        assert!(notes.contains("Imported from: owner/repo#42"));
-        assert!(notes.contains("Users cannot login"));
-        assert!(notes.contains("Labels: bug, auth"));
+    #[test]
+    fn parse_kairo_md_basic() {
+        let raw = "\
+- [ ] Refactor auth #backend !p1 due:2026-05-15
+- [ ] Write docs #docs
+- this is not a task
+- [x] Already done #legacy
+";
+        let recs = parse_kairo_md(raw);
+        assert_eq!(recs.len(), 3);
+        assert_eq!(recs[0].title, "Refactor auth");
+        assert_eq!(recs[0].priority, Priority::P1);
+        assert_eq!(recs[0].tags, vec!["backend"]);
+        assert_eq!(recs[0].due, NaiveDate::from_ymd_opt(2026, 5, 15));
+        assert_eq!(recs[1].title, "Write docs");
+        assert_eq!(recs[1].tags, vec!["docs"]);
+        assert_eq!(recs[2].title, "Already done");
+    }
+
+    #[test]
+    fn parse_kairo_md_indented_become_acceptance_criteria() {
+        let raw = "\
+- [ ] Parent task #core
+  - [ ] Sub item one
+  - [ ] Sub item two
+- [ ] Sibling
+";
+        let recs = parse_kairo_md(raw);
+        assert_eq!(recs.len(), 2);
+        assert_eq!(recs[0].title, "Parent task");
+        assert_eq!(
+            recs[0].acceptance_criteria,
+            vec!["Sub item one", "Sub item two"]
+        );
+        assert_eq!(recs[1].title, "Sibling");
+    }
+
+    #[test]
+    fn parse_linear_csv_standard_columns() {
+        let raw = "\
+ID,Title,Description,Priority,Labels,Due Date
+ENG-1,Implement OAuth,Body text,Urgent,\"backend, auth\",2026-06-01
+ENG-2,Fix typo,,Low,docs,
+";
+        let recs = parse_linear_csv(raw).unwrap();
+        assert_eq!(recs.len(), 2);
+        assert_eq!(recs[0].source_ref.as_deref(), Some("ENG-1"));
+        assert_eq!(recs[0].title, "Implement OAuth");
+        assert_eq!(recs[0].priority, Priority::P1);
+        assert_eq!(recs[0].tags, vec!["backend", "auth"]);
+        assert_eq!(recs[0].due, NaiveDate::from_ymd_opt(2026, 6, 1));
+        assert_eq!(recs[1].priority, Priority::P4);
+        assert_eq!(recs[1].tags, vec!["docs"]);
+    }
+
+    #[test]
+    fn parse_linear_csv_skips_empty_titles() {
+        let raw = "ID,Title\nENG-1,\nENG-2,Real one\n";
+        let recs = parse_linear_csv(raw).unwrap();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].title, "Real one");
+    }
+
+    #[test]
+    fn parse_linear_csv_missing_title_errors() {
+        let raw = "ID,Body\nENG-1,whatever\n";
+        let err = parse_linear_csv(raw).unwrap_err();
+        assert!(err.to_string().contains("Title"));
+    }
+
+    #[test]
+    fn linear_priority_mapping() {
+        assert_eq!(linear_priority_from_str("Urgent"), Some(Priority::P1));
+        assert_eq!(linear_priority_from_str("high"), Some(Priority::P2));
+        assert_eq!(linear_priority_from_str("medium"), Some(Priority::P3));
+        assert_eq!(linear_priority_from_str("Low"), Some(Priority::P4));
+        assert_eq!(linear_priority_from_str("No priority"), Some(Priority::P5));
+        assert_eq!(linear_priority_from_str(""), Some(Priority::P5));
+        assert_eq!(linear_priority_from_str("garbage"), None);
     }
 
     #[test]
@@ -486,19 +871,7 @@ mod tests {
             .lines()
             .find(|l| l.starts_with("Imported from: "))
             .map(|l| l.trim_start_matches("Imported from: ").to_string());
-
         assert_eq!(source_ref, Some("owner/repo#42".to_string()));
-    }
-
-    #[test]
-    fn dedup_no_match_for_normal_notes() {
-        let existing_notes = "Regular notes without import marker";
-        let source_ref: Option<String> = existing_notes
-            .lines()
-            .find(|l| l.starts_with("Imported from: "))
-            .map(|l| l.trim_start_matches("Imported from: ").to_string());
-
-        assert_eq!(source_ref, None);
     }
 
     #[test]
@@ -519,12 +892,10 @@ mod tests {
                 }],
             },
         ];
-
         let filtered: Vec<&GithubIssue> = issues
             .iter()
             .filter(|i| !i.labels.iter().any(|l| l.name == "pull_request"))
             .collect();
-
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].title, "Real issue");
     }
@@ -533,13 +904,11 @@ mod tests {
     fn linear_filter_single_team() {
         let team = "ENG";
         let filters = vec![format!("{{ team: {{ key: {{ eq: \"{}\" }} }} }}", team)];
-
         let filter = if filters.len() == 1 {
             filters.into_iter().next().unwrap_or_default()
         } else {
             format!("{{ and: [{}] }}", filters.join(", "))
         };
-
         assert!(filter.contains("ENG"));
         assert!(!filter.contains("and:"));
     }
@@ -550,9 +919,7 @@ mod tests {
             r#"{ team: { key: { eq: "ENG" } } }"#.to_string(),
             r#"{ state: { name: { eq: "Todo" } } }"#.to_string(),
         ];
-
         let filter = format!("{{ and: [{}] }}", filters.join(", "));
-
         assert!(filter.contains("and:"));
         assert!(filter.contains("ENG"));
         assert!(filter.contains("Todo"));

@@ -1,4 +1,4 @@
-use tc_core::task::{Assignee, Priority, TaskId};
+use tc_core::task::{Assignee, Priority, Task, TaskId};
 
 use crate::editor::Editor;
 
@@ -39,6 +39,9 @@ pub struct CreateTaskForm {
     pub files: Vec<String>,
     pub files_input: Editor,
     pub active_field: CreateTaskField,
+    /// `Some(id)` when the form was opened from an existing task (M-7.6). The
+    /// submit path branches on this to update vs. create.
+    pub editing: Option<TaskId>,
 }
 
 impl CreateTaskForm {
@@ -58,7 +61,39 @@ impl CreateTaskForm {
             files: vec![],
             files_input: Editor::new(),
             active_field: CreateTaskField::Title,
+            editing: None,
         }
+    }
+
+    /// Build a form pre-populated from an existing task (M-7.6).
+    pub fn from_task(task: &Task) -> Self {
+        let mut title = Editor::new();
+        title.set_text(&task.title);
+        let mut epic = Editor::new();
+        epic.set_text(&task.epic);
+        let mut notes = Editor::new();
+        if !task.notes.is_empty() {
+            notes.set_text(&task.notes);
+        }
+        Self {
+            title,
+            epic,
+            priority: task.priority,
+            assignee: task.assignee.clone(),
+            depends_on: task.depends_on.clone(),
+            dep_input: Editor::new(),
+            notes,
+            acceptance_criteria: task.acceptance_criteria.clone(),
+            ac_input: Editor::new(),
+            files: task.files.clone(),
+            files_input: Editor::new(),
+            active_field: CreateTaskField::Title,
+            editing: Some(task.id.clone()),
+        }
+    }
+
+    pub fn is_editing(&self) -> bool {
+        self.editing.is_some()
     }
 
     pub fn next_field(&mut self) {
@@ -79,19 +114,21 @@ impl CreateTaskForm {
 
     pub fn cycle_priority_next(&mut self) {
         self.priority = match self.priority {
-            Priority::Critical => Priority::High,
-            Priority::High => Priority::Normal,
-            Priority::Normal => Priority::Low,
-            Priority::Low => Priority::Critical,
+            Priority::P1 => Priority::P2,
+            Priority::P2 => Priority::P3,
+            Priority::P3 => Priority::P4,
+            Priority::P4 => Priority::P5,
+            Priority::P5 => Priority::P1,
         };
     }
 
     pub fn cycle_priority_prev(&mut self) {
         self.priority = match self.priority {
-            Priority::Critical => Priority::Low,
-            Priority::High => Priority::Critical,
-            Priority::Normal => Priority::High,
-            Priority::Low => Priority::Normal,
+            Priority::P1 => Priority::P5,
+            Priority::P2 => Priority::P1,
+            Priority::P3 => Priority::P2,
+            Priority::P4 => Priority::P3,
+            Priority::P5 => Priority::P4,
         };
     }
 

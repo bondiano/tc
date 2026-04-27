@@ -71,6 +71,10 @@ pub enum StorageError {
     #[error("config validation failed: {0}")]
     ConfigValidation(#[source] tc_core::error::CoreError),
 
+    #[error("{0}")]
+    #[diagnostic(transparent)]
+    Core(#[from] tc_core::error::CoreError),
+
     #[error("timed out acquiring lock on '{path}' after {seconds}s")]
     #[diagnostic(
         code(tc::storage::lock_timeout),

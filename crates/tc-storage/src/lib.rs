@@ -7,6 +7,7 @@ pub mod tasks;
 use std::path::PathBuf;
 
 pub use error::{StorageError, StorageResult};
+pub use tasks::MigrationReport;
 
 use tc_core::config::TcConfig;
 use tc_core::task::{Task, TaskId};
@@ -61,6 +62,21 @@ impl Store {
 
     pub fn next_task_id(&self, tasks: &[Task]) -> TaskId {
         tasks::next_id(tasks)
+    }
+
+    /// Plan a migration of `tasks.yaml`: report what would change without
+    /// writing. The caller decides whether to apply it.
+    pub fn plan_migration(&self) -> StorageResult<(MigrationReport, String)> {
+        atomic::with_exclusive_lock(&self.lock_path(), || {
+            tasks::plan_migration(&self.tasks_path())
+        })
+    }
+
+    /// Apply a migration to `tasks.yaml`, normalizing key order and filling
+    /// in defaults for any newly-introduced schema fields. Identical bytes
+    /// are not rewritten.
+    pub fn migrate_tasks(&self) -> StorageResult<MigrationReport> {
+        atomic::with_exclusive_lock(&self.lock_path(), || tasks::migrate(&self.tasks_path()))
     }
 
     pub fn load_config(&self) -> StorageResult<TcConfig> {

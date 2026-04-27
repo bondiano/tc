@@ -15,7 +15,12 @@ description = "Core types, DAG, and status machine for tc (Task Commander). No I
 [dependencies]
 serde = { workspace = true }
 chrono = { workspace = true }
+humantime-serde = { workspace = true }
 thiserror = { workspace = true }
 miette = { workspace = true }
 petgraph = { workspace = true }
 minijinja = { workspace = true }
+nucleo-matcher = { workspace = true }
+
+[dev-dependencies]
+serde_yaml_ng = { workspace = true }

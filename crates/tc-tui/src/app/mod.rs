@@ -19,6 +19,6 @@ mod input_tests;
 mod update_tests;
 
 pub use settings::{SettingsField, SettingsState};
-pub use types::{App, AppScreen, FocusPanel, InputMode, TuiAction};
+pub use types::{App, AppScreen, FocusPanel, InputMode, SmartView, TuiAction};
 
 pub(crate) const ALL_EPIC: &str = "all";

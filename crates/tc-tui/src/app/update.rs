@@ -83,6 +83,7 @@ impl App {
 
     pub(super) fn on_tick(&mut self) -> TuiResult<()> {
         self.reconcile_and_toast();
+        self.prune_completion_animations();
         if self.show_log {
             self.tail_log();
         }

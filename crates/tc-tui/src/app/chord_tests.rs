@@ -191,3 +191,77 @@ fn leader_capital_s_opens_settings() {
         .unwrap();
     assert!(app.settings.is_some());
 }
+
+// ── M-7.9: leader-menu extension ─────────────────────────────────────
+
+#[test]
+fn leader_f_opens_fuzzy_finder() {
+    let mut app = app_with(vec![dummy_task("T-001", "alpha", "todo")]);
+    app.update(Message::Key(key(' ').0, key(' ').1)).unwrap();
+    app.update(Message::Key(key('f').0, key('f').1)).unwrap();
+    assert_eq!(app.input_mode, InputMode::Filter);
+    assert_eq!(app.pending_chord, PendingChord::None);
+}
+
+#[test]
+fn leader_slash_opens_fuzzy_finder() {
+    let mut app = app_with(vec![dummy_task("T-001", "alpha", "todo")]);
+    app.update(Message::Key(key(' ').0, key(' ').1)).unwrap();
+    app.update(Message::Key(KeyCode::Char('/'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.input_mode, InputMode::Filter);
+}
+
+#[test]
+fn leader_capital_t_cycles_theme() {
+    let mut app = app_with(vec![dummy_task("T-001", "alpha", "todo")]);
+    let before = app.config.ui.theme.clone();
+    app.update(Message::Key(key(' ').0, key(' ').1)).unwrap();
+    app.update(Message::Key(KeyCode::Char('T'), KeyModifiers::SHIFT))
+        .unwrap();
+    assert_ne!(
+        app.config.ui.theme, before,
+        "theme should advance to the next preset"
+    );
+    assert_eq!(app.pending_chord, PendingChord::None);
+}
+
+#[test]
+fn leader_view_slash_opens_fuzzy_finder() {
+    let mut app = app_with(vec![dummy_task("T-001", "alpha", "todo")]);
+    app.update(Message::Key(key(' ').0, key(' ').1)).unwrap();
+    app.update(Message::Key(key('v').0, key('v').1)).unwrap();
+    app.update(Message::Key(KeyCode::Char('/'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.input_mode, InputMode::Filter);
+}
+
+#[test]
+fn leader_view_capital_t_cycles_theme() {
+    let mut app = app_with(vec![dummy_task("T-001", "alpha", "todo")]);
+    let before = app.config.ui.theme.clone();
+    app.update(Message::Key(key(' ').0, key(' ').1)).unwrap();
+    app.update(Message::Key(key('v').0, key('v').1)).unwrap();
+    app.update(Message::Key(KeyCode::Char('T'), KeyModifiers::SHIFT))
+        .unwrap();
+    assert_ne!(app.config.ui.theme, before);
+}
+
+#[test]
+fn cycle_theme_wraps_to_first_after_last() {
+    let mut app = app_with(vec![dummy_task("T-001", "alpha", "todo")]);
+    let presets = tc_core::theme::Theme::PRESET_NAMES;
+    // Walk a full lap and assert each step is a real preset and the
+    // sequence returns home.
+    let start = app.config.ui.theme.clone();
+    'lap: for _ in 0..presets.len() {
+        app.cycle_theme().expect("cycle_theme");
+        assert!(
+            presets.iter().any(|n| *n == app.config.ui.theme),
+            "cycled to unknown preset: {}",
+            app.config.ui.theme
+        );
+        continue 'lap;
+    }
+    assert_eq!(app.config.ui.theme, start, "full cycle should return home");
+}

@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
+use chrono::Local;
 use tc_core::dag::TaskDag;
+use tc_core::filter::Filter;
 use tc_core::status::{StatusId, StatusMachine};
 use tc_core::task::Task;
 
@@ -21,7 +23,15 @@ pub fn run(args: ListArgs) -> Result<(), CliError> {
     let sm = StatusMachine::new(config.statuses);
     let dag = TaskDag::from_tasks(&tasks)?;
 
-    let filtered = filter_tasks(&tasks, &args, &dag, &sm);
+    // Concatenate positional args back into a single query string. clap splits
+    // them on whitespace if the user runs `tc list priority:p1 tag:foo`
+    // without quotes, so re-joining preserves the parser's contract.
+    let query = args.query.join(" ");
+    let filter =
+        Filter::parse(&query).map_err(|e| CliError::user(format!("invalid filter: {e}")))?;
+
+    let today = Local::now().date_naive();
+    let filtered = filter_tasks(&tasks, &args, &dag, &sm, &filter, today);
 
     if args.ids_only {
         for t in &filtered {
@@ -49,6 +59,8 @@ fn filter_tasks<'a>(
     args: &ListArgs,
     dag: &TaskDag,
     sm: &StatusMachine,
+    filter: &Filter,
+    today: chrono::NaiveDate,
 ) -> Vec<&'a Task> {
     let ready_ids = if args.ready {
         Some(dag.compute_ready(tasks, sm))
@@ -72,6 +84,7 @@ fn filter_tasks<'a>(
                 .as_ref()
                 .is_none_or(|e| t.epic.eq_ignore_ascii_case(e))
         })
+        .filter(|t| filter.matches(t, today))
         .collect()
 }
 

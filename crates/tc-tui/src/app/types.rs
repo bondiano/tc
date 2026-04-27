@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
 use tc_core::config::TcConfig;
@@ -8,10 +8,59 @@ use tc_core::task::{Task, TaskId};
 use tc_spawn::process::WorkerState;
 use tc_storage::Store;
 
+/// Predefined "smart view" tabs surfaced in the header (M-7.2).
+///
+/// `Today`/`Upcoming`/`Inbox` mirror the CLI smart-view filters from
+/// `tc_core::filter` semantics so the TUI shortcuts feel identical to
+/// `tc today` / `tc upcoming` / `tc inbox`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SmartView {
+    #[default]
+    All,
+    Today,
+    Upcoming,
+    Inbox,
+}
+
+impl SmartView {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Today => "Today",
+            Self::Upcoming => "Upcoming",
+            Self::Inbox => "Inbox",
+        }
+    }
+
+    pub fn shortcut(self) -> char {
+        match self {
+            Self::Today => '1',
+            Self::Upcoming => '2',
+            Self::Inbox => '3',
+            Self::All => '4',
+        }
+    }
+
+    pub fn all() -> [SmartView; 4] {
+        [Self::Today, Self::Upcoming, Self::Inbox, Self::All]
+    }
+
+    pub fn from_shortcut(c: char) -> Option<Self> {
+        match c {
+            '1' => Some(Self::Today),
+            '2' => Some(Self::Upcoming),
+            '3' => Some(Self::Inbox),
+            '4' => Some(Self::All),
+            _ => None,
+        }
+    }
+}
+
 use crate::create_task::CreateTaskForm;
 use crate::editor::Editor;
 use crate::keybind::PendingChord;
 use crate::log_view::LogView;
+use crate::theme::Palette;
 
 use super::settings::SettingsState;
 
@@ -77,7 +126,10 @@ pub struct App {
 
     pub input_mode: InputMode,
     pub input: Editor,
+    /// Active fuzzy/filter query. Applied as a fuzzy match (M-7.1) on top of
+    /// the current epic + smart view selection.
     pub filter: String,
+    pub smart_view: SmartView,
 
     pub status_message: String,
     pub log_view: LogView,
@@ -91,4 +143,10 @@ pub struct App {
     pub screen: AppScreen,
     pub create_task_form: Option<CreateTaskForm>,
     pub settings: Option<SettingsState>,
+    pub palette: Palette,
+
+    /// Map of task IDs that just transitioned to a terminal status, to the
+    /// instant the transition fired. Renderer fades + strikes through these
+    /// rows for [`COMPLETION_ANIMATION_DURATION`] (M-7.8).
+    pub completion_animations: HashMap<TaskId, Instant>,
 }

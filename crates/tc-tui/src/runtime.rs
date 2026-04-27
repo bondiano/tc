@@ -53,10 +53,17 @@ fn run_loop(app: &mut App) -> TuiResult<()> {
             .map_err(TuiError::from)?;
 
         let tick_remaining = TICK.saturating_sub(last_tick.elapsed());
-        let timeout = match app.chord_wake_in() {
-            Some(wake) if wake < tick_remaining => wake,
-            _ => tick_remaining,
-        };
+        let mut timeout = tick_remaining;
+        if let Some(wake) = app.chord_wake_in()
+            && wake < timeout
+        {
+            timeout = wake;
+        }
+        if let Some(wake) = app.animation_wake_in()
+            && wake < timeout
+        {
+            timeout = wake;
+        }
         if let Some(msg) = poll(timeout)? {
             app.update(msg)?;
         }

@@ -10,6 +10,7 @@ const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
 const BLUE: &str = "\x1b[34m";
 const WHITE: &str = "\x1b[37m";
+const DIM: &str = "\x1b[2;37m";
 const BOLD: &str = "\x1b[1m";
 
 pub fn colors_enabled() -> bool {
@@ -46,10 +47,11 @@ pub fn colored_status_str(status: &str) -> String {
 
 fn priority_color(priority: &Priority) -> &'static str {
     match priority {
-        Priority::Critical => RED,
-        Priority::High => YELLOW,
-        Priority::Normal => WHITE,
-        Priority::Low => BLUE,
+        Priority::P1 => RED,
+        Priority::P2 => YELLOW,
+        Priority::P3 => WHITE,
+        Priority::P4 => BLUE,
+        Priority::P5 => DIM,
     }
 }
 
@@ -246,6 +248,25 @@ fn format_detail_impl(task: &Task, use_color: bool) -> String {
         format!("Created:    {}", task.created_at.format("%Y-%m-%d %H:%M")),
     ];
 
+    if !task.tags.is_empty() {
+        lines.push(format!("Tags:       {}", task.tags.join(", ")));
+    }
+
+    if let Some(due) = task.due {
+        lines.push(format!("Due:        {due}"));
+    }
+
+    if let Some(scheduled) = task.scheduled {
+        lines.push(format!("Scheduled:  {scheduled}"));
+    }
+
+    if let Some(estimate) = task.estimate {
+        lines.push(format!(
+            "Estimate:   {}",
+            humantime::format_duration(estimate)
+        ));
+    }
+
     if !task.depends_on.is_empty() {
         let deps: Vec<String> = task.depends_on.iter().map(|d| d.to_string()).collect();
         lines.push(format!("Depends on: {}", deps.join(", ")));
@@ -285,6 +306,10 @@ mod tests {
             epic: epic.to_string(),
             status: StatusId(status.to_string()),
             priority: Priority::default(),
+            tags: vec![],
+            due: None,
+            scheduled: None,
+            estimate: None,
             depends_on: vec![],
             files: vec![],
             pack_exclude: vec![],
@@ -340,7 +365,7 @@ mod tests {
         assert!(result.contains("Epic"));
         assert!(result.contains("Status"));
         assert!(result.contains("Priority"));
-        assert!(result.contains("normal"));
+        assert!(result.contains("p3"));
     }
 
     #[test]
@@ -400,7 +425,7 @@ mod tests {
         assert!(result.contains("T-001 My Task"));
         assert!(result.contains("Epic:       backend"));
         assert!(result.contains("Status:     todo"));
-        assert!(result.contains("Priority:   normal"));
+        assert!(result.contains("Priority:   p3"));
         assert!(result.contains("Assignee:   --"));
     }
 

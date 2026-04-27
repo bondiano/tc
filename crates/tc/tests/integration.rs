@@ -93,21 +93,14 @@ fn add_task_with_files() {
 fn add_task_with_priority() {
     let dir = setup_project();
     let output = tc_in(dir.path())
-        .args([
-            "add",
-            "Critical Task",
-            "--epic",
-            "be",
-            "--priority",
-            "critical",
-        ])
+        .args(["add", "Critical Task", "--epic", "be", "--priority", "p1"])
         .output()
         .unwrap();
     assert!(output.status.success());
 
     let show = tc_in(dir.path()).args(["show", "T-001"]).output().unwrap();
     let stdout = String::from_utf8_lossy(&show.stdout);
-    assert!(stdout.contains("critical"));
+    assert!(stdout.contains("p1"));
 }
 
 #[test]
@@ -120,7 +113,7 @@ fn add_task_default_priority() {
 
     let show = tc_in(dir.path()).args(["show", "T-001"]).output().unwrap();
     let stdout = String::from_utf8_lossy(&show.stdout);
-    assert!(stdout.contains("normal"));
+    assert!(stdout.contains("p3"));
 }
 
 #[test]
@@ -2402,4 +2395,429 @@ fn plan_dry_run_with_resolved_deps() {
     assert!(stdout.contains("T-001"));
     assert!(stdout.contains("First task"));
     assert!(stdout.contains("[done]"));
+}
+
+// ── tc migrate (M-6.2) ───────────────────────────────────────────────
+
+const LEGACY_TASKS_YAML: &str = "tasks:\n- id: T-001\n  title: Pre-6.1 task\n  epic: legacy\n  status: todo\n  assignee: null\n  created_at: 2026-01-01T00:00:00Z\n";
+
+fn write_legacy_tasks(dir: &std::path::Path) {
+    std::fs::write(dir.join(".tc/tasks.yaml"), LEGACY_TASKS_YAML).unwrap();
+}
+
+#[test]
+fn migrate_rewrites_legacy_yaml() {
+    let dir = setup_project();
+    write_legacy_tasks(dir.path());
+
+    let output = tc_in(dir.path()).args(["migrate"]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("normalized"), "stderr was: {stderr}");
+
+    let written = std::fs::read_to_string(dir.path().join(".tc/tasks.yaml")).unwrap();
+    assert!(
+        written.contains("priority: p3"),
+        "migrated file should populate priority: {written}"
+    );
+}
+
+#[test]
+fn migrate_noop_on_already_normalized_file() {
+    let dir = setup_project();
+    tc_in(dir.path())
+        .args(["add", "Fresh task", "--epic", "be"])
+        .output()
+        .unwrap();
+    let before = std::fs::read_to_string(dir.path().join(".tc/tasks.yaml")).unwrap();
+
+    let output = tc_in(dir.path()).args(["migrate"]).output().unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("up to date"),
+        "expected no-op message, got: {stderr}"
+    );
+
+    let after = std::fs::read_to_string(dir.path().join(".tc/tasks.yaml")).unwrap();
+    assert_eq!(before, after, "no-op migrate must not touch the file");
+}
+
+#[test]
+fn migrate_dry_run_does_not_write() {
+    let dir = setup_project();
+    write_legacy_tasks(dir.path());
+
+    let output = tc_in(dir.path())
+        .args(["migrate", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("priority: p3"),
+        "dry-run stdout should preview normalized YAML: {stdout}"
+    );
+
+    let on_disk = std::fs::read_to_string(dir.path().join(".tc/tasks.yaml")).unwrap();
+    assert_eq!(
+        on_disk, LEGACY_TASKS_YAML,
+        "dry-run must leave file untouched"
+    );
+}
+
+#[test]
+fn migrate_check_exits_nonzero_when_changes_pending() {
+    let dir = setup_project();
+    write_legacy_tasks(dir.path());
+
+    let output = tc_in(dir.path())
+        .args(["migrate", "--check"])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "--check must fail when migration is pending"
+    );
+
+    let on_disk = std::fs::read_to_string(dir.path().join(".tc/tasks.yaml")).unwrap();
+    assert_eq!(on_disk, LEGACY_TASKS_YAML, "--check must not write");
+}
+
+#[test]
+fn migrate_check_succeeds_when_file_is_current() {
+    let dir = setup_project();
+    tc_in(dir.path())
+        .args(["add", "Fresh task", "--epic", "be"])
+        .output()
+        .unwrap();
+
+    let output = tc_in(dir.path())
+        .args(["migrate", "--check"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "--check must succeed on a current file"
+    );
+}
+
+// ── tc add / tc edit new flags (M-6.3) ───────────────────────────────
+
+#[test]
+fn add_with_all_new_flags_round_trips_via_show() {
+    let dir = setup_project();
+    let output = tc_in(dir.path())
+        .args([
+            "add",
+            "Triage me",
+            "--epic",
+            "be",
+            "--priority",
+            "p1",
+            "--tag",
+            "backend",
+            "--tag",
+            "perf",
+            "--due",
+            "2026-06-01",
+            "--scheduled",
+            "2026-05-25",
+            "--estimate",
+            "2h",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let show = tc_in(dir.path()).args(["show", "T-001"]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&show.stdout);
+    assert!(stdout.contains("p1"), "show should render p1: {stdout}");
+    assert!(
+        stdout.contains("backend"),
+        "show should render tag backend: {stdout}"
+    );
+    assert!(
+        stdout.contains("perf"),
+        "show should render tag perf: {stdout}"
+    );
+    assert!(
+        stdout.contains("2026-06-01"),
+        "show should render due: {stdout}"
+    );
+    assert!(
+        stdout.contains("2026-05-25"),
+        "show should render scheduled: {stdout}"
+    );
+    assert!(
+        stdout.contains("2h"),
+        "show should render estimate: {stdout}"
+    );
+}
+
+#[test]
+fn add_rejects_bad_date_format() {
+    let dir = setup_project();
+    let output = tc_in(dir.path())
+        .args(["add", "x", "--epic", "e", "--due", "2026/06/01"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "bad date must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("YYYY-MM-DD"),
+        "error should hint format: {stderr}"
+    );
+}
+
+#[test]
+fn add_rejects_bad_duration() {
+    let dir = setup_project();
+    let output = tc_in(dir.path())
+        .args(["add", "x", "--epic", "e", "--estimate", "forever"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "bad duration must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("duration"),
+        "error should mention duration: {stderr}"
+    );
+}
+
+#[test]
+fn edit_inline_flags_skip_editor_and_apply_patch() {
+    let dir = setup_project();
+    tc_in(dir.path())
+        .args(["add", "before", "--epic", "be"])
+        .output()
+        .unwrap();
+
+    let output = tc_in(dir.path())
+        .args([
+            "edit",
+            "T-001",
+            "--priority",
+            "p1",
+            "--tag",
+            "urgent",
+            "--due",
+            "2026-07-04",
+            "--estimate",
+            "30m",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let show = tc_in(dir.path()).args(["show", "T-001"]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&show.stdout);
+    assert!(stdout.contains("p1"));
+    assert!(stdout.contains("urgent"));
+    assert!(stdout.contains("2026-07-04"));
+    assert!(stdout.contains("30m"));
+}
+
+#[test]
+fn edit_clear_token_removes_due_and_estimate() {
+    let dir = setup_project();
+    tc_in(dir.path())
+        .args([
+            "add",
+            "with deadline",
+            "--epic",
+            "be",
+            "--due",
+            "2026-06-01",
+            "--estimate",
+            "2h",
+        ])
+        .output()
+        .unwrap();
+
+    let output = tc_in(dir.path())
+        .args(["edit", "T-001", "--due", "clear", "--estimate", "clear"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let show = tc_in(dir.path()).args(["show", "T-001"]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&show.stdout);
+    assert!(!stdout.contains("Due:"), "Due should be cleared: {stdout}");
+    assert!(
+        !stdout.contains("Estimate:"),
+        "Estimate should be cleared: {stdout}"
+    );
+}
+
+#[test]
+fn edit_add_tag_and_rm_tag_preserve_others() {
+    let dir = setup_project();
+    tc_in(dir.path())
+        .args([
+            "add", "x", "--epic", "be", "--tag", "a", "--tag", "b", "--tag", "c",
+        ])
+        .output()
+        .unwrap();
+
+    let output = tc_in(dir.path())
+        .args(["edit", "T-001", "--add-tag", "d", "--rm-tag", "b"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let show = tc_in(dir.path()).args(["show", "T-001"]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&show.stdout);
+    assert!(stdout.contains("a"));
+    assert!(stdout.contains("c"));
+    assert!(stdout.contains("d"));
+    // The Tags line itself is `Tags:       a, c, d`. Check that 'b' is
+    // absent from THAT specific row.
+    let tags_line = stdout.lines().find(|l| l.starts_with("Tags:")).unwrap();
+    assert!(
+        !tags_line.contains('b'),
+        "tag b should be removed: {tags_line}"
+    );
+}
+
+#[test]
+fn edit_add_tag_does_not_duplicate() {
+    let dir = setup_project();
+    tc_in(dir.path())
+        .args(["add", "x", "--epic", "be", "--tag", "dup"])
+        .output()
+        .unwrap();
+
+    tc_in(dir.path())
+        .args(["edit", "T-001", "--add-tag", "dup"])
+        .output()
+        .unwrap();
+
+    let show = tc_in(dir.path()).args(["show", "T-001"]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&show.stdout);
+    let tags_line = stdout.lines().find(|l| l.starts_with("Tags:")).unwrap();
+    let count = tags_line.matches("dup").count();
+    assert_eq!(count, 1, "tag must not duplicate: {tags_line}");
+}
+
+#[test]
+fn edit_no_flags_falls_through_to_editor() {
+    // When VISUAL/EDITOR points at /usr/bin/false the editor exits non-zero,
+    // but the *attempt* proves we took the editor path. With inline flags the
+    // command would succeed without ever invoking the editor.
+    let dir = setup_project();
+    tc_in(dir.path())
+        .args(["add", "edit me", "--epic", "be"])
+        .output()
+        .unwrap();
+
+    let mut cmd = tc_in(dir.path());
+    cmd.env("VISUAL", "/usr/bin/false")
+        .env("EDITOR", "/usr/bin/false");
+    let output = cmd.args(["edit", "T-001"]).output().unwrap();
+    assert!(
+        !output.status.success(),
+        "editor false must propagate failure"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Editor exited"),
+        "should hit editor branch: {stderr}"
+    );
+}
+
+#[test]
+fn add_legacy_priority_alias_still_loads_via_yaml_then_show() {
+    // We can't pass --priority critical (CLI rejects) but YAML files written
+    // by older tc versions used `priority: critical`. Drop one in by hand to
+    // confirm the alias path keeps working end-to-end.
+    let dir = setup_project();
+    let yaml = "tasks:\n- id: T-001\n  title: legacy\n  epic: legacy\n  status: todo\n  priority: critical\n  assignee: null\n  created_at: 2026-01-01T00:00:00Z\n";
+    std::fs::write(dir.path().join(".tc/tasks.yaml"), yaml).unwrap();
+
+    let show = tc_in(dir.path()).args(["show", "T-001"]).output().unwrap();
+    assert!(show.status.success());
+    let stdout = String::from_utf8_lossy(&show.stdout);
+    assert!(
+        stdout.contains("p1"),
+        "alias 'critical' should display as canonical p1: {stdout}"
+    );
+}
+
+// ── tc ui theme (M-7.5) ──────────────────────────────────────────────
+
+#[test]
+fn ui_theme_default_is_default() {
+    let dir = setup_project();
+    let out = tc_in(dir.path()).args(["ui", "theme"]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout.trim(), "default");
+}
+
+#[test]
+fn ui_theme_set_persists_to_config() {
+    let dir = setup_project();
+    let out = tc_in(dir.path())
+        .args(["ui", "theme", "solarized"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let cfg = std::fs::read_to_string(dir.path().join(".tc/config.yaml")).unwrap();
+    assert!(cfg.contains("theme: solarized"), "config: {cfg}");
+
+    let printed = tc_in(dir.path()).args(["ui", "theme"]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&printed.stdout).trim(), "solarized");
+}
+
+#[test]
+fn ui_theme_list_marks_active() {
+    let dir = setup_project();
+    tc_in(dir.path())
+        .args(["ui", "theme", "dim"])
+        .output()
+        .unwrap();
+    let out = tc_in(dir.path())
+        .args(["ui", "theme", "list"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("* dim"), "active marker missing: {stdout}");
+    // Other presets present without marker.
+    assert!(stdout.contains("  default"), "{stdout}");
+    assert!(stdout.contains("  solarized"), "{stdout}");
+}
+
+#[test]
+fn ui_theme_unknown_rejected() {
+    let dir = setup_project();
+    let out = tc_in(dir.path())
+        .args(["ui", "theme", "neon"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "should reject unknown theme");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("unknown theme"), "{stderr}");
 }

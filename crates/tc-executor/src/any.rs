@@ -151,7 +151,7 @@ mod tests {
 
     fn minimal_cfg() -> TcConfig {
         use tc_core::config::{
-            ExecutionMode, ExecutorConfig, PackerConfig, SandboxConfig, SpawnConfig,
+            ExecutionMode, ExecutorConfig, PackerConfig, SandboxConfig, SpawnConfig, UiConfig,
             VerificationConfig,
         };
         use tc_core::status::{StatusDef, StatusId};
@@ -193,6 +193,7 @@ mod tests {
                 on_complete: "pr".into(),
             },
             verification: VerificationConfig::default(),
+            ui: UiConfig::default(),
         }
     }
 

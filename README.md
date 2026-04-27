@@ -14,6 +14,7 @@ results -- all from a single CLI.
 - **Review/Merge**: review agent's diff and merge worktree back into main
 - **Recovery**: detect orphaned workers after a crash and clean up
 - **Sandbox**: integration with `sbx` (Docker AI Sandboxes) and `nono` (Landlock)
+- **TUI**: ratatui interface with smart-view tabs, fuzzy finder, and a redesigned task row
 
 ## Platform support
 
@@ -90,6 +91,43 @@ tc merge T-001
 | `tc kill <id>` / `tc kill --all` | Stop worker(s) |
 | `tc review <id> [--reject "feedback"]` | Diff in pager or reject into notes |
 | `tc merge <id>` / `tc merge --all` | Merge worktree back into main |
+
+## TUI
+
+Launch the interactive terminal UI with `tc tui`. Three panels (epics, tasks,
+detail) plus optional log/DAG overlays, vim-style navigation, and a leader
+menu (`Space`) with which-key hints.
+
+### Smart-view tabs
+
+The header surfaces four predefined views with one-keystroke shortcuts (number
+keys in normal mode, or `Space v <key>` via the leader menu):
+
+| Key       | View       | Filter |
+|-----------|------------|--------|
+| `1` / `t` | Today      | due or scheduled today, non-terminal |
+| `2` / `u` | Upcoming   | due/scheduled within the next 7 days, exclusive of today |
+| `3` / `i` | Inbox      | open tasks with no due/scheduled date |
+| `4` / `a` | All        | unfiltered |
+
+The active tab is highlighted in the header bar. Switching a view resets the
+selection cursor to the top of the new list.
+
+### Fuzzy finder
+
+Press `/` (or `Space /`) to open a live fuzzy finder over `id`, `title`, and
+`tags` -- backed by [`nucleo-matcher`](https://crates.io/crates/nucleo-matcher),
+the same matcher Helix uses. Results re-rank as you type. The query persists
+after `Enter`; press `/` again to refine, or `Esc` to drop it.
+
+### Task row
+
+Each row shows: `ID | P | Title (with inline tag chips and age hint) | Due | Status`.
+Priority badges are colour-coded (`P1` red bold, `P2` yellow bold, `P3` plain,
+`P4`/`P5` dim). Due dates display as `OVR` (red, past), `today` (yellow), or
+`MM/DD` (cyan). The age hint after the title reads `3d` / `2w` / `1mo` for
+quick triage of stale tasks. The first two tags render as `·tag` chips; extra
+tags collapse into a `+N` indicator.
 
 ## Shell Completions
 

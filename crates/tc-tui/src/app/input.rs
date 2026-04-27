@@ -8,7 +8,7 @@ use crate::error::TuiResult;
 use crate::keybind::{Direction, PendingChord};
 
 use super::ALL_EPIC;
-use super::types::{App, AppScreen, FocusPanel, InputMode};
+use super::types::{App, AppScreen, FocusPanel, InputMode, SmartView};
 
 impl App {
     pub(super) fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) -> TuiResult<()> {
@@ -79,6 +79,7 @@ impl App {
             KeyCode::Char('l') => self.toggle_log(),
             KeyCode::Char('a') => self.open_create_task_form(),
             KeyCode::Char('A') => self.enter_input(InputMode::AddTask, "Quick add task: "),
+            KeyCode::Char('e') => self.open_edit_task_form(),
             KeyCode::Char('/') => self.enter_input(InputMode::Filter, "Filter: "),
             KeyCode::Char('d') => self.action_done()?,
             KeyCode::Char('x') => self.action_delete(),
@@ -92,6 +93,12 @@ impl App {
                 self.show_help = !self.show_help;
             }
             KeyCode::Char(',') => self.open_settings(),
+            KeyCode::Char(c @ '1'..='4') => {
+                if let Some(view) = SmartView::from_shortcut(c) {
+                    self.set_smart_view(view);
+                    self.toast(&format!("view: {}", view.label()));
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -260,9 +267,9 @@ impl App {
             KeyCode::Char('v') => {
                 self.begin_chord(PendingChord::LeaderView);
             }
-            KeyCode::Char('/') => {
+            KeyCode::Char('/') | KeyCode::Char('f') => {
                 self.end_chord();
-                self.enter_input(InputMode::Filter, "Filter: ");
+                self.enter_input(InputMode::Filter, "Fuzzy: ");
             }
             KeyCode::Char('a') => {
                 self.end_chord();
@@ -271,6 +278,10 @@ impl App {
             KeyCode::Char('A') => {
                 self.end_chord();
                 self.enter_input(InputMode::AddTask, "Quick add task: ");
+            }
+            KeyCode::Char('T') => {
+                self.end_chord();
+                self.cycle_theme()?;
             }
             KeyCode::Char('S') | KeyCode::Char(',') => {
                 self.end_chord();
@@ -292,6 +303,10 @@ impl App {
                 self.action_delete();
                 Ok(())
             }
+            KeyCode::Char('e') => {
+                self.open_edit_task_form();
+                Ok(())
+            }
             KeyCode::Char('i') => self.action_impl(),
             KeyCode::Char('s') | KeyCode::Char('y') => self.action_spawn(),
             KeyCode::Char('K') => self.action_kill(),
@@ -309,8 +324,36 @@ impl App {
         match code {
             KeyCode::Char('g') => self.toggle_dag(),
             KeyCode::Char('l') => self.toggle_log(),
+            KeyCode::Char('/') => self.enter_input(InputMode::Filter, "Fuzzy: "),
+            KeyCode::Char('T') => {
+                if let Err(e) = self.cycle_theme() {
+                    self.toast(&format!("theme: {e}"));
+                }
+            }
             KeyCode::Char('?') => {
                 self.show_help = !self.show_help;
+            }
+            KeyCode::Char(c @ ('1' | '2' | '3' | '4')) => {
+                if let Some(view) = SmartView::from_shortcut(c) {
+                    self.set_smart_view(view);
+                    self.toast(&format!("view: {}", view.label()));
+                }
+            }
+            KeyCode::Char('t') => {
+                self.set_smart_view(SmartView::Today);
+                self.toast("view: Today");
+            }
+            KeyCode::Char('u') => {
+                self.set_smart_view(SmartView::Upcoming);
+                self.toast("view: Upcoming");
+            }
+            KeyCode::Char('i') => {
+                self.set_smart_view(SmartView::Inbox);
+                self.toast("view: Inbox");
+            }
+            KeyCode::Char('a') => {
+                self.set_smart_view(SmartView::All);
+                self.toast("view: All");
             }
             _ => {}
         }
@@ -433,6 +476,10 @@ impl App {
                     epic,
                     status: StatusId("todo".into()),
                     priority: tc_core::task::Priority::default(),
+                    tags: vec![],
+                    due: None,
+                    scheduled: None,
+                    estimate: None,
                     depends_on: vec![],
                     files: vec![],
                     pack_exclude: vec![],

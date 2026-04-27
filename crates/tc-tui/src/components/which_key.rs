@@ -18,8 +18,10 @@ const LEADER_MENU: &[(&str, &str)] = &[
     ("w", "+window"),
     ("t", "+task"),
     ("v", "+view"),
-    ("/", "filter"),
+    ("f", "fuzzy find"),
+    ("/", "fuzzy find"),
     ("a", "add task"),
+    ("T", "cycle theme"),
     ("S", "settings"),
     ("q", "quit"),
     ("Esc", "cancel"),
@@ -35,6 +37,7 @@ const LEADER_WINDOW_MENU: &[(&str, &str)] = &[
 
 const LEADER_TASK_MENU: &[(&str, &str)] = &[
     ("d", "mark done"),
+    ("e", "edit task (form)"),
     ("x", "delete task"),
     ("i", "start (interactive)"),
     ("s", "run in background"),
@@ -48,7 +51,13 @@ const LEADER_TASK_MENU: &[(&str, &str)] = &[
 const LEADER_VIEW_MENU: &[(&str, &str)] = &[
     ("g", "toggle dependencies"),
     ("l", "toggle log"),
+    ("/", "fuzzy find"),
+    ("T", "cycle theme"),
     ("?", "help popup"),
+    ("1 / t", "view: Today"),
+    ("2 / u", "view: Upcoming"),
+    ("3 / i", "view: Inbox"),
+    ("4 / a", "view: All"),
     ("Esc", "cancel"),
 ];
 

@@ -2,5 +2,8 @@ pub mod config;
 pub mod context;
 pub mod dag;
 pub mod error;
+pub mod filter;
+pub mod fuzzy;
 pub mod status;
 pub mod task;
+pub mod theme;

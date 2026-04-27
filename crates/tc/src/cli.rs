@@ -1,6 +1,11 @@
+use std::time::Duration;
+
+use chrono::NaiveDate;
 use clap::{Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use tc_core::task::Priority;
+
+use crate::cli_parsers::{DateArg, DurationArg, parse_duration, parse_naive_date};
 
 #[derive(Parser)]
 #[command(
@@ -30,11 +35,8 @@ pub enum Commands {
         id: String,
     },
 
-    /// Edit task in $EDITOR
-    Edit {
-        /// Task ID
-        id: String,
-    },
+    /// Edit task: with no flags opens $EDITOR; with flags applies them in place
+    Edit(EditArgs),
 
     /// Delete a task
     Delete(DeleteArgs),
@@ -64,6 +66,21 @@ pub enum Commands {
 
     /// Show next ready task
     Next,
+
+    /// Smart view: tasks due or scheduled today
+    Today,
+
+    /// Smart view: tasks due or scheduled within the next N days
+    Upcoming(UpcomingArgs),
+
+    /// Smart view: open tasks with no due/scheduled date
+    Inbox,
+
+    /// Smart view: tasks past their due date
+    Overdue,
+
+    /// Fuzzy search by ID, title, or tag
+    Find(FindArgs),
 
     /// Validate DAG integrity
     Validate,
@@ -117,17 +134,46 @@ pub enum Commands {
     /// Import tasks from external sources (GitHub Issues, Linear)
     Import(ImportArgs),
 
+    /// Export tasks to JSON or kairo-style markdown (round-trips with `tc import`)
+    Export(ExportArgs),
+
     /// Generate changelog from done tasks
     Changelog(ChangelogArgs),
 
+    /// Normalize .tc/tasks.yaml to the current schema (fills defaults for
+    /// any newly-introduced fields). Safe to re-run.
+    Migrate(MigrateArgs),
+
     /// Launch TUI
     Tui,
+
+    /// Manage TUI appearance (themes, etc.)
+    Ui(UiArgs),
 
     /// Generate shell completions
     Completion {
         /// Shell to generate completions for
         shell: Shell,
     },
+}
+
+#[derive(clap::Args)]
+pub struct UiArgs {
+    #[command(subcommand)]
+    pub action: UiAction,
+}
+
+#[derive(Subcommand)]
+pub enum UiAction {
+    /// Manage TUI color theme
+    Theme(UiThemeArgs),
+}
+
+#[derive(clap::Args)]
+pub struct UiThemeArgs {
+    /// Theme name to activate. Omit to print the current theme. Use `list` to
+    /// list available presets.
+    pub name: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -170,32 +216,111 @@ pub struct AddArgs {
     /// Acceptance criteria (repeatable)
     #[arg(long = "ac")]
     pub acceptance_criteria: Option<Vec<String>>,
-    /// Priority level
-    #[arg(long, value_enum, default_value_t = CliPriority::Normal)]
+    /// Priority level (p1..p5)
+    #[arg(long, value_enum, default_value_t = CliPriority::P3)]
     pub priority: CliPriority,
+    /// Tag (repeatable: --tag backend --tag perf)
+    #[arg(long = "tag")]
+    pub tags: Vec<String>,
+    /// Due date (YYYY-MM-DD)
+    #[arg(long, value_parser = parse_naive_date)]
+    pub due: Option<NaiveDate>,
+    /// Scheduled start date (YYYY-MM-DD)
+    #[arg(long, value_parser = parse_naive_date)]
+    pub scheduled: Option<NaiveDate>,
+    /// Time estimate (e.g. 2h, 45m, 1h30m)
+    #[arg(long, value_parser = parse_duration)]
+    pub estimate: Option<Duration>,
 }
 
-#[derive(Clone, Copy, ValueEnum)]
+/// Inline-edit flags. With no flags set, `tc edit` opens $EDITOR (current
+/// behavior). When *any* flag is set we skip the editor and apply the patch
+/// in place via `Store::update_tasks`.
+#[derive(clap::Args)]
+pub struct EditArgs {
+    /// Task ID (e.g. T-001)
+    pub id: String,
+    /// New title
+    #[arg(long)]
+    pub title: Option<String>,
+    /// New status
+    #[arg(long)]
+    pub status: Option<String>,
+    /// New epic
+    #[arg(long)]
+    pub epic: Option<String>,
+    /// New priority (p1..p5)
+    #[arg(long, value_enum)]
+    pub priority: Option<CliPriority>,
+    /// Replace all tags (repeatable: --tag a --tag b)
+    #[arg(long = "tag")]
+    pub tags: Option<Vec<String>>,
+    /// Append a tag (repeatable; preserves existing)
+    #[arg(long = "add-tag")]
+    pub add_tags: Vec<String>,
+    /// Remove a tag (repeatable; no-op if not present)
+    #[arg(long = "rm-tag")]
+    pub rm_tags: Vec<String>,
+    /// Due date (YYYY-MM-DD or `clear`)
+    #[arg(long)]
+    pub due: Option<DateArg>,
+    /// Scheduled date (YYYY-MM-DD or `clear`)
+    #[arg(long)]
+    pub scheduled: Option<DateArg>,
+    /// Estimate (e.g. 2h, 45m, or `clear`)
+    #[arg(long)]
+    pub estimate: Option<DurationArg>,
+    /// Append acceptance criterion (repeatable)
+    #[arg(long = "add-ac")]
+    pub add_acceptance_criteria: Vec<String>,
+}
+
+impl EditArgs {
+    /// True when at least one mutating flag was supplied. Drives the
+    /// dispatch in `commands::edit::run`.
+    pub fn has_any_patch(&self) -> bool {
+        self.title.is_some()
+            || self.status.is_some()
+            || self.epic.is_some()
+            || self.priority.is_some()
+            || self.tags.is_some()
+            || !self.add_tags.is_empty()
+            || !self.rm_tags.is_empty()
+            || self.due.is_some()
+            || self.scheduled.is_some()
+            || self.estimate.is_some()
+            || !self.add_acceptance_criteria.is_empty()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
 pub enum CliPriority {
-    Critical,
-    High,
-    Normal,
-    Low,
+    P1,
+    P2,
+    #[default]
+    P3,
+    P4,
+    P5,
 }
 
 impl From<CliPriority> for Priority {
     fn from(p: CliPriority) -> Self {
         match p {
-            CliPriority::Critical => Priority::Critical,
-            CliPriority::High => Priority::High,
-            CliPriority::Normal => Priority::Normal,
-            CliPriority::Low => Priority::Low,
+            CliPriority::P1 => Priority::P1,
+            CliPriority::P2 => Priority::P2,
+            CliPriority::P3 => Priority::P3,
+            CliPriority::P4 => Priority::P4,
+            CliPriority::P5 => Priority::P5,
         }
     }
 }
 
 #[derive(clap::Args)]
 pub struct ListArgs {
+    /// Filter DSL query (e.g. "priority:p1 tag:backend status:todo").
+    /// Supported keys: priority, tag, status, epic, due, scheduled, id, title.
+    /// Prefix a term with `!` to negate it.
+    pub query: Vec<String>,
     /// Show only ready tasks
     #[arg(long)]
     pub ready: bool,
@@ -206,6 +331,25 @@ pub struct ListArgs {
     #[arg(long)]
     pub epic: Option<String>,
     /// Print task IDs one per line (for shell completion)
+    #[arg(long)]
+    pub ids_only: bool,
+}
+
+#[derive(clap::Args)]
+pub struct UpcomingArgs {
+    /// Window in days (default: 7)
+    #[arg(long, default_value_t = 7)]
+    pub days: u32,
+}
+
+#[derive(clap::Args)]
+pub struct FindArgs {
+    /// Query string -- matched against task ID, title, and tags
+    pub query: String,
+    /// Maximum number of results (default: 20)
+    #[arg(long, default_value_t = 20)]
+    pub limit: usize,
+    /// Print matched IDs only (one per line, for shell scripting)
     #[arg(long)]
     pub ids_only: bool,
 }
@@ -397,8 +541,31 @@ pub struct TestArgs {
 
 #[derive(clap::Args)]
 pub struct ImportArgs {
+    /// File-based import format (alternative to GitHub/Linear API subcommands)
+    #[arg(long, value_enum)]
+    pub format: Option<ImportFormat>,
+    /// Path to file (required with --format)
+    #[arg(long)]
+    pub file: Option<std::path::PathBuf>,
+    /// Epic for imported tasks (required with --format)
+    #[arg(long)]
+    pub epic: Option<String>,
+    /// Dry-run: print what would be imported without creating tasks
+    #[arg(long)]
+    pub dry_run: bool,
+
     #[command(subcommand)]
-    pub source: ImportSource,
+    pub source: Option<ImportSource>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ImportFormat {
+    /// JSON array of task records (see docs)
+    Json,
+    /// Kairo-style markdown checklist (`- [ ] Title +tag:foo !p1`)
+    KairoMd,
+    /// Linear CSV export
+    LinearCsv,
 }
 
 #[derive(Subcommand)]
@@ -454,6 +621,30 @@ pub struct LinearImportArgs {
 }
 
 #[derive(clap::Args)]
+pub struct ExportArgs {
+    /// Output format (default: json)
+    #[arg(long, value_enum, default_value_t = ExportFormat::Json)]
+    pub format: ExportFormat,
+    /// Filter DSL query (same grammar as `tc list`).
+    /// Example: `tc export --format json "priority:p1 tag:backend"`
+    pub query: Vec<String>,
+    /// Filter by epic (combined with query, AND)
+    #[arg(long)]
+    pub epic: Option<String>,
+    /// Write to file instead of stdout
+    #[arg(long, short)]
+    pub output: Option<std::path::PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ExportFormat {
+    /// JSON array, schema mirrors `tc import --format json`
+    Json,
+    /// Kairo-style markdown checklist, round-trips with `tc import --format kairo-md`
+    Md,
+}
+
+#[derive(clap::Args)]
 pub struct ChangelogArgs {
     /// Filter by epic
     #[arg(long)]
@@ -467,4 +658,15 @@ pub struct ChangelogArgs {
 pub enum ChangelogFormat {
     Markdown,
     Plain,
+}
+
+#[derive(clap::Args)]
+pub struct MigrateArgs {
+    /// Print the normalized YAML without writing.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Exit non-zero if migration would change the file (CI use).
+    /// Mutually exclusive with --dry-run.
+    #[arg(long, conflicts_with = "dry_run")]
+    pub check: bool,
 }

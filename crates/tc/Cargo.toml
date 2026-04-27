@@ -30,6 +30,8 @@ miette = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 chrono = { workspace = true }
+humantime = { workspace = true }
+humantime-serde = { workspace = true }
 which = { workspace = true }
 tempfile = "3"
 
@@ -40,5 +42,6 @@ serde_yaml_ng = { workspace = true }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
+csv = { workspace = true }
 
 [dev-dependencies]

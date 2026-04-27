@@ -23,6 +23,10 @@ pub fn run(args: AddArgs) -> Result<(), CliError> {
             .map(tc_core::task::TaskId)
             .collect(),
         priority: Priority::from(args.priority),
+        tags: args.tags,
+        due: args.due,
+        scheduled: args.scheduled,
+        estimate: args.estimate,
         files: args.files.unwrap_or_default(),
         pack_exclude: vec![],
         notes: String::new(),

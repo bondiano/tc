@@ -170,6 +170,8 @@ pub struct TcConfig {
     pub spawn: SpawnConfig,
     #[serde(default)]
     pub verification: VerificationConfig,
+    #[serde(default)]
+    pub ui: UiConfig,
 }
 
 impl TcConfig {
@@ -280,6 +282,18 @@ impl TcConfig {
         // -- Plan template --
         if let Err(e) = ContextRenderer::new(&self.plan_template) {
             errors.push(CoreError::invalid_config("plan_template", format!("{e}")));
+        }
+
+        // -- UI theme --
+        if crate::theme::Theme::by_name(&self.ui.theme).is_none() {
+            errors.push(CoreError::invalid_config(
+                "ui.theme",
+                format!(
+                    "unknown theme '{}' (valid: {})",
+                    self.ui.theme,
+                    crate::theme::Theme::PRESET_NAMES.join(", ")
+                ),
+            ));
         }
 
         if errors.is_empty() {
@@ -412,6 +426,26 @@ pub struct SpawnConfig {
     pub auto_commit: bool,
     #[serde(default = "default_on_complete")]
     pub on_complete: String,
+}
+
+/// User-facing UI preferences (M-7.5). Currently only the theme; new
+/// fields here should default-construct so older configs keep loading.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UiConfig {
+    #[serde(default = "default_theme_name")]
+    pub theme: String,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            theme: default_theme_name(),
+        }
+    }
+}
+
+fn default_theme_name() -> String {
+    "default".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -631,6 +665,7 @@ mod tests {
                 on_complete: "pr".into(),
             },
             verification: VerificationConfig::default(),
+            ui: UiConfig::default(),
         }
     }
 

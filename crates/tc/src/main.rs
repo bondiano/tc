@@ -4,6 +4,7 @@ compile_error!(
 );
 
 mod cli;
+mod cli_parsers;
 mod commands;
 mod error;
 mod output;
@@ -50,12 +51,17 @@ async fn dispatch(cmd: Commands) -> Result<(), CliError> {
         Commands::Add(args) => commands::add::run(args),
         Commands::List(args) => commands::list::run(args),
         Commands::Show { id } => commands::show::run(&id),
-        Commands::Edit { id } => commands::edit::run(&id),
+        Commands::Edit(args) => commands::edit::run(args),
         Commands::Delete(args) => commands::delete::run(args),
         Commands::Done { id } => commands::status::run_done(&id),
         Commands::Block { id, reason } => commands::status::run_block(&id, &reason),
         Commands::Status { id, status } => commands::status::run_set(&id, &status),
         Commands::Next => commands::next::run(),
+        Commands::Today => commands::views::today(),
+        Commands::Upcoming(args) => commands::views::upcoming(args.days),
+        Commands::Inbox => commands::views::inbox(),
+        Commands::Overdue => commands::views::overdue(),
+        Commands::Find(args) => commands::find::run(args),
         Commands::Validate => commands::validate::run(),
         Commands::Stats => commands::stats::run(),
         Commands::Graph(args) => commands::graph::run(args),
@@ -72,9 +78,12 @@ async fn dispatch(cmd: Commands) -> Result<(), CliError> {
         Commands::Test(args) => commands::test::run(args).await,
         Commands::Epic(args) => commands::epic::run(args),
         Commands::Import(args) => commands::import::run(args).await,
+        Commands::Export(args) => commands::export::run(args),
         Commands::Config(args) => commands::config::run(args),
         Commands::Changelog(args) => commands::changelog::run(args),
+        Commands::Migrate(args) => commands::migrate::run(args),
         Commands::Tui => commands::tui::run().map_err(Into::into),
+        Commands::Ui(args) => commands::ui::run(args),
         Commands::Completion { shell } => commands::completion::run(shell),
     }
 }
