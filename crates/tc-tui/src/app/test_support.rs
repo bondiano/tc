@@ -113,6 +113,7 @@ pub fn app_with(tasks: Vec<Task>) -> App {
         epic_counts: BTreeMap::new(),
         selected_epic: 0,
         selected_task: 0,
+        selected_ac: 0,
         focus: FocusPanel::Tasks,
         show_dag: false,
         show_log: false,

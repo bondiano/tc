@@ -265,3 +265,94 @@ fn cycle_theme_wraps_to_first_after_last() {
     }
     assert_eq!(app.config.ui.theme, start, "full cycle should return home");
 }
+
+// ── M-7.4: Detail panel AC checklist toggle ──────────────────────────
+
+fn make_task_with_ac(id: &str, status: &str, ac: &[&str]) -> tc_core::task::Task {
+    let mut t = dummy_task(id, "alpha", status);
+    t.acceptance_criteria = ac.iter().map(|s| (*s).to_string()).collect();
+    t
+}
+
+#[test]
+fn space_on_detail_toggles_selected_ac() {
+    let mut app = app_with(vec![make_task_with_ac(
+        "T-001",
+        "todo",
+        &["build the thing", "test the thing"],
+    )]);
+    app.focus = FocusPanel::Detail;
+    app.selected_ac = 0;
+
+    app.update(Message::Key(key(' ').0, key(' ').1)).unwrap();
+    // Space on Detail should toggle, NOT open the leader chord.
+    assert_eq!(app.pending_chord, PendingChord::None);
+    let task = app.tasks.iter().find(|t| t.id.0 == "T-001").unwrap();
+    assert_eq!(task.acceptance_criteria[0], "[x] build the thing");
+    assert_eq!(task.acceptance_criteria[1], "test the thing");
+}
+
+#[test]
+fn space_on_detail_without_ac_falls_back_to_leader() {
+    // A task with no acceptance criteria should leave space behaving as
+    // the leader chord -- the toggle path has nothing to act on.
+    let mut app = app_with(vec![dummy_task("T-001", "alpha", "todo")]);
+    app.focus = FocusPanel::Detail;
+    app.update(Message::Key(key(' ').0, key(' ').1)).unwrap();
+    assert_eq!(app.pending_chord, PendingChord::Leader);
+}
+
+#[test]
+fn jk_on_detail_moves_ac_cursor() {
+    let mut app = app_with(vec![make_task_with_ac("T-001", "todo", &["a", "b", "c"])]);
+    app.focus = FocusPanel::Detail;
+    assert_eq!(app.selected_ac, 0);
+    app.update(Message::Key(KeyCode::Char('j'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.selected_ac, 1);
+    app.update(Message::Key(KeyCode::Char('j'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.selected_ac, 2);
+    // Past last AC -- should clamp.
+    app.update(Message::Key(KeyCode::Char('j'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.selected_ac, 2);
+    app.update(Message::Key(KeyCode::Char('k'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.selected_ac, 1);
+}
+
+#[test]
+fn switching_tasks_resets_ac_cursor() {
+    let mut app = app_with(vec![
+        make_task_with_ac("T-001", "todo", &["a", "b"]),
+        make_task_with_ac("T-002", "todo", &["x", "y"]),
+    ]);
+    app.focus = FocusPanel::Detail;
+    app.update(Message::Key(KeyCode::Char('j'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.selected_ac, 1);
+    // Move back to Tasks panel and step to next task -- AC cursor should reset.
+    app.focus = FocusPanel::Tasks;
+    app.update(Message::Key(KeyCode::Char('j'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.selected_task, 1);
+    assert_eq!(app.selected_ac, 0);
+}
+
+#[test]
+fn space_toggle_round_trips_through_unchecked() {
+    let mut app = app_with(vec![make_task_with_ac("T-001", "todo", &["item one"])]);
+    app.focus = FocusPanel::Detail;
+    app.selected_ac = 0;
+    app.update(Message::Key(key(' ').0, key(' ').1)).unwrap();
+    assert_eq!(
+        app.tasks[0].acceptance_criteria[0], "[x] item one",
+        "first toggle marks checked"
+    );
+    app.update(Message::Key(key(' ').0, key(' ').1)).unwrap();
+    assert_eq!(
+        app.tasks[0].acceptance_criteria[0], "[ ] item one",
+        "second toggle marks unchecked"
+    );
+}

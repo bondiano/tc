@@ -111,6 +111,10 @@ pub struct App {
     pub selected_epic: usize,
 
     pub selected_task: usize,
+    /// Cursor inside the Detail panel's AC checklist (M-7.4). Reset on
+    /// task switch; clamped on render so a stale index never indexes
+    /// past `task.acceptance_criteria.len()`.
+    pub selected_ac: usize,
     pub focus: FocusPanel,
 
     pub show_dag: bool,

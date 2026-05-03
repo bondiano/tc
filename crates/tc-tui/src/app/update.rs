@@ -84,7 +84,18 @@ impl App {
     pub(super) fn on_tick(&mut self) -> TuiResult<()> {
         self.reconcile_and_toast();
         self.prune_completion_animations();
-        if self.show_log {
+        // Tail the worker log either when the user opened the pager (so
+        // they see fresh lines as they arrive) or when the Detail panel
+        // needs a live tail for an active worker (M-7.4). Without the
+        // second branch the live-tail block in the Detail panel would
+        // stay frozen at "(no output yet)" until the user opened the
+        // pager once.
+        let needs_detail_tail = self
+            .selected_task()
+            .as_ref()
+            .map(|t| self.worker_for(&t.id).is_some())
+            .unwrap_or(false);
+        if self.show_log || needs_detail_tail {
             self.tail_log();
         }
         Ok(())

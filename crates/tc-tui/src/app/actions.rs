@@ -12,6 +12,43 @@ use super::ALL_EPIC;
 use super::types::{App, AppScreen, TuiAction};
 
 impl App {
+    /// Toggle the AC under `selected_ac` for the currently selected task,
+    /// rewriting the criterion's markdown checkbox prefix and persisting
+    /// the result (M-7.4). Returns silently when there is no selection or
+    /// the index is out of range -- input handling probes
+    /// `has_selectable_ac` first, but the storage path stays defensive.
+    pub(super) fn toggle_selected_ac(&mut self) -> TuiResult<()> {
+        let Some(task) = self.selected_task() else {
+            return Ok(());
+        };
+        let idx = self.selected_ac;
+        if idx >= task.acceptance_criteria.len() {
+            return Ok(());
+        }
+        let was_terminal = self.status_machine.is_terminal(&task.status);
+        let mut new_tasks = self.tasks.clone();
+        if let Some(target) = new_tasks.iter_mut().find(|t| t.id == task.id)
+            && let Some(criterion) = target.acceptance_criteria.get_mut(idx)
+        {
+            let (checked, body) =
+                crate::components::detail::parse_ac_state(criterion, was_terminal);
+            *criterion = crate::components::detail::write_ac_state(&body, !checked);
+        }
+        self.store.save_tasks(&new_tasks)?;
+        self.reload_tasks()?;
+        Ok(())
+    }
+
+    /// Whether the Detail focus has at least one acceptance-criterion row
+    /// the user could put a cursor on. Used by the space-to-toggle path so
+    /// pressing space on a task without AC still falls through to the
+    /// leader chord.
+    pub fn has_selectable_ac(&self) -> bool {
+        self.selected_task()
+            .map(|t| !t.acceptance_criteria.is_empty())
+            .unwrap_or(false)
+    }
+
     pub(super) fn action_done(&mut self) -> TuiResult<()> {
         let Some(t) = self.selected_task() else {
             return Ok(());

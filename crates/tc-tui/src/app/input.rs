@@ -52,6 +52,13 @@ impl App {
             return Ok(());
         }
         if matches!(code, KeyCode::Char(' ')) {
+            // M-7.4: when the Detail panel has focus and the selected task
+            // exposes acceptance criteria, space toggles the criterion under
+            // the cursor instead of opening the leader chord. Tasks without
+            // AC fall through so the chord stays available.
+            if self.focus == FocusPanel::Detail && self.has_selectable_ac() {
+                return self.toggle_selected_ac();
+            }
             self.begin_chord(PendingChord::Leader);
             return Ok(());
         }

@@ -104,15 +104,26 @@ impl App {
                 if self.selected_epic + 1 < self.epics.len() {
                     self.selected_epic += 1;
                     self.selected_task = 0;
+                    self.selected_ac = 0;
                 }
             }
             FocusPanel::Tasks => {
                 let len = self.visible_tasks().len();
                 if len > 0 && self.selected_task + 1 < len {
                     self.selected_task += 1;
+                    self.selected_ac = 0;
                 }
             }
-            FocusPanel::Log | FocusPanel::Detail | FocusPanel::Dag => {}
+            FocusPanel::Detail => {
+                let len = self
+                    .selected_task()
+                    .map(|t| t.acceptance_criteria.len())
+                    .unwrap_or(0);
+                if len > 0 && self.selected_ac + 1 < len {
+                    self.selected_ac += 1;
+                }
+            }
+            FocusPanel::Log | FocusPanel::Dag => {}
         }
     }
 
@@ -122,14 +133,21 @@ impl App {
                 if self.selected_epic > 0 {
                     self.selected_epic -= 1;
                     self.selected_task = 0;
+                    self.selected_ac = 0;
                 }
             }
             FocusPanel::Tasks => {
                 if self.selected_task > 0 {
                     self.selected_task -= 1;
+                    self.selected_ac = 0;
                 }
             }
-            FocusPanel::Log | FocusPanel::Detail | FocusPanel::Dag => {}
+            FocusPanel::Detail => {
+                if self.selected_ac > 0 {
+                    self.selected_ac -= 1;
+                }
+            }
+            FocusPanel::Log | FocusPanel::Dag => {}
         }
     }
 

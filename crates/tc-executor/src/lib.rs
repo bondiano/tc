@@ -6,6 +6,7 @@ pub mod io;
 pub mod log_tail;
 pub mod mock;
 pub mod opencode;
+pub mod reviewer;
 pub mod sandbox;
 pub mod tester;
 pub mod traits;

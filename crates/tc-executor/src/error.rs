@@ -89,6 +89,30 @@ pub enum ExecutorError {
         path: std::path::PathBuf,
         source: serde_json::Error,
     },
+
+    #[error("failed to read review verdict at '{path}': {source}")]
+    #[diagnostic(
+        code(tc::executor::review_read),
+        help(
+            "check file permissions; if the reviewer did not write a verdict, no merge decision is applied"
+        )
+    )]
+    ReviewRead {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
+
+    #[error("failed to parse review verdict at '{path}': {source}")]
+    #[diagnostic(
+        code(tc::executor::review_parse),
+        help(
+            "review must be JSON like {{\"summary\":\"...\",\"confidence\":0.85,\"risks\":[\"...\"]}}"
+        )
+    )]
+    ReviewParse {
+        path: std::path::PathBuf,
+        source: serde_json::Error,
+    },
 }
 
 impl ExecutorError {
@@ -139,6 +163,20 @@ impl ExecutorError {
 
     pub fn verdict_parse(path: impl Into<std::path::PathBuf>, source: serde_json::Error) -> Self {
         Self::VerdictParse {
+            path: path.into(),
+            source,
+        }
+    }
+
+    pub fn review_read(path: impl Into<std::path::PathBuf>, source: std::io::Error) -> Self {
+        Self::ReviewRead {
+            path: path.into(),
+            source,
+        }
+    }
+
+    pub fn review_parse(path: impl Into<std::path::PathBuf>, source: serde_json::Error) -> Self {
+        Self::ReviewParse {
             path: path.into(),
             source,
         }
